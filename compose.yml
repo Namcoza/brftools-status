@@ -1,10 +1,11 @@
-# Production runtime declaration for the P410 Docker profile.
-# Real values come from the environment on the server — never hard-code
-# hostnames, addresses or secrets here. See docs/deployment-profiles.md.
+# Production runtime declaration. On the P410 this file is copied to the app's
+# directory under /srv/apps and run by the deploy script with IMAGE set to an
+# immutable digest. Real values come from .env, rendered from 1Password at deploy
+# time — never hard-code hostnames, addresses or secrets here.
 
 services:
   app:
-    image: ${IMAGE:-brftools-template:local}
+    image: ${IMAGE:-brftools-status:local}
     build:
       context: .
       args:
@@ -13,6 +14,7 @@ services:
     env_file:
       - path: .env
         required: false
+    stop_grace_period: 10s
 
     # Resource limits are required: this host also runs the family's game servers.
     mem_limit: 256m
@@ -27,13 +29,16 @@ services:
     cap_drop:
       - ALL
 
-    # No published ports: the reverse proxy reaches the app over the shared network.
+    # No published ports: the reverse proxy reaches the app over the shared network,
+    # by a project-specific alias. The generic service name "app" would collide with
+    # other projects on the same network.
     networks:
-      - edge
+      edge:
+        aliases:
+          - brftools-status
 
-    # Persistent data: none.
-    # If the app needs any, declare a named volume here and record it, with its
-    # backup treatment, under "Persistent data" in README.md.
+    # Persistent data: none in the container. Release history lives in the "status"
+    # database on the shared PostgreSQL instance — see "Persistent data" in README.md.
 
 networks:
   edge:

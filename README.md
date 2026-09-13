@@ -1,28 +1,8 @@
-# brftools-template
+# brftools-status
 
-Starting point for every new brftools project. It gives an AI agent everything it needs to work on a project without undocumented knowledge: a runnable TypeScript app, the checks every pull request must pass, the agent rules, and two documented deployment profiles.
+Release history for the brftools P410 deploy pilot. Each time a version of the app starts, it records the version and start time in PostgreSQL and lists them on its home page. See [`PRODUCT.md`](PRODUCT.md) for purpose and acceptance criteria.
 
 **branch = work · pull request = validation · main = live**
-
----
-
-## Start a new project from this template
-
-1. Work through [`docs/intake-checklist.md`](docs/intake-checklist.md) and fill in [`PRODUCT.md`](PRODUCT.md).
-2. On GitHub: **Use this template → Create a new repository.** Keep it public unless there is a reason not to.
-3. Clone it and set it up:
-   ```bash
-   git clone https://github.com/<owner>/<new-project>.git
-   cd <new-project>
-   npm ci
-   npm test
-   ```
-4. Rename the project: `name` in `package.json`, the title of this README, the `IMAGE` default in `compose.yml`.
-5. Choose the hosting profile and remove the files it does not use — see [`docs/deployment-profiles.md`](docs/deployment-profiles.md). A static site also adds `wrangler.jsonc`, before connecting Cloudflare.
-6. Rewrite this README's sections below for the project, and delete this "Start a new project" section.
-7. Protect `main` — see [Repository settings](#repository-settings).
-
-Then open a session with an agent in the project folder. `AGENTS.md` (and `CLAUDE.md`, which points to it) tells it the rest.
 
 ---
 
@@ -31,21 +11,34 @@ Then open a session with an agent in the project folder. `AGENTS.md` (and `CLAUD
 | Tool | Version | Install (Mac) |
 |---|---|---|
 | Node.js | 24 LTS (`.nvmrc`) | `brew install node@24 && brew link --overwrite node@24` — `node@24` is not linked onto the PATH by default |
+| PostgreSQL | 17 | `brew install postgresql@17` — for local development and tests |
 | gitleaks | 8.x | `brew install gitleaks` |
-
-Docker is not needed for local development. CI builds and tests the container image.
 
 ## Commands
 
 | Task | Command |
 |---|---|
 | Install | `npm ci` |
-| Run locally, reloading on change | `npm run dev` → http://localhost:3000 |
+| Run locally, reloading on change | `npm run dev` → http://localhost:3000 (needs `DATABASE_URL` in `.env`) |
 | Type check | `npm run check` |
-| Test | `npm test` |
+| Test | `npm test` — set `TEST_DATABASE_URL` to run the database tests; they are skipped otherwise |
 | Build | `npm run build` → `dist/` |
 | Run the build | `npm start` |
 | Scan for secrets | `npm run secrets` |
+
+The database tests drop and recreate their tables, so `TEST_DATABASE_URL` must name a database whose name contains `test`. A throwaway local database:
+
+```bash
+PG=/opt/homebrew/opt/postgresql@17/bin
+export LC_ALL=en_US.UTF-8   # Homebrew's postgres refuses to start without a valid locale
+$PG/initdb -D /tmp/status-pg -U postgres --auth=trust
+$PG/pg_ctl -D /tmp/status-pg -o "-p 55432 -c listen_addresses=127.0.0.1 -c unix_socket_directories=" -l /tmp/status-pg.log -w start
+$PG/createdb -h 127.0.0.1 -p 55432 -U postgres status_test
+TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/status_test npm test
+$PG/pg_ctl -D /tmp/status-pg stop
+```
+
+TCP only (`unix_socket_directories=`) avoids macOS's 103-byte limit on socket paths when the data directory is deep.
 
 ## Layout
 
@@ -53,54 +46,44 @@ Docker is not needed for local development. CI builds and tests the container im
 AGENTS.md            rules for AI-assisted changes (CLAUDE.md points here)
 PRODUCT.md           purpose, users and acceptance criteria
 docs/                intake checklist, deployment profiles, decisions
-src/                 application code — config.ts, app.ts, server.ts
-public/              static assets; the whole site for static-site projects
+src/                 config.ts, db.ts (pool, migrations, queries), app.ts, server.ts
+migrations/          numbered SQL migrations, applied in order at startup
 tests/               node:test tests
-scripts/             build helpers
-Dockerfile           P410 profile only
-compose.yml          P410 profile only — production runtime declaration
+Dockerfile           production image
+compose.yml          production runtime declaration
 .env.example         variable names only; never values
 .gitleaks.toml       secret-scanning rules
-.github/workflows/   ci.yml — the required checks
+.github/workflows/   ci.yml (required checks), deploy.yml (publish image)
 ```
 
 ## Hosting profile
 
-<!-- Static site on Cloudflare, or P410 Docker. Delete the other. -->
-
-**Not yet chosen.**
+**P410 Docker.** See [`docs/deployment-profiles.md`](docs/deployment-profiles.md), Profile B.
 
 ## Configuration
 
 | Variable | Purpose | Default |
 |---|---|---|
+| `DATABASE_URL` | PostgreSQL connection string, including credentials | required |
 | `PORT` | Port the server listens on | `3000` |
-| `APP_VERSION` | Version reported by `/healthz`; CI sets it to the commit SHA | `dev` |
-| `PUBLIC_DIR` | Directory served at `/` | `./public` |
+| `APP_VERSION` | Version recorded and reported; the image sets it to the commit SHA | `dev` |
 
-Real values never go in the repository. Locally, copy `.env.example` to `.env`, which is gitignored.
+Real values never go in the repository. In production, `.env` is rendered from 1Password at deploy time.
 
 ## Persistent data
 
-<!-- What the app stores, where, and how it is backed up and restored. -->
+| Data | Where | Backup | Restore |
+|---|---|---|---|
+| Release history | `status` database on the P410's shared PostgreSQL, owned by the `status` role | Included in the nightly `pg_dumpall` | Restore the dump into a clean instance; the table is also safe to lose — it is history only |
 
-None. The app is stateless and rebuilt entirely from this repository.
+Schema changes are numbered files in `migrations/`, applied once each at startup inside a transaction. Each file carries its own recovery note. Rolling back an image does not reverse a migration.
 
 ## Deploy, verify, roll back
 
-See [`docs/deployment-profiles.md`](docs/deployment-profiles.md) for the chosen profile. Replace this paragraph with the project's specific hostname-free steps once it is deployed.
-
-- **Deploy:** merge a passing pull request to `main`.
-- **Verify:** `GET /healthz` returns `{"status":"ok","version":"<commit sha>"}` (P410), or the site shows the change (static).
-- **Roll back:** as described for the profile.
+- **Deploy:** merge a passing pull request to `main`. CI passes, then `deploy.yml` publishes `ghcr.io/namcoza/brftools-status:<full sha>` and moves `:main` to it. The P410 picks up the new `:main` digest within a few minutes.
+- **Verify:** `GET /healthz` returns `{"status":"ok","version":"<commit sha>","database":"ok"}`, and the home page shows that version at the top.
+- **Roll back:** on the P410, run the deploy script with `--rollback` to return to the previous image digest. A release that fails its health check is rolled back automatically.
 
 ## Repository settings
 
-Set once per repository, on GitHub under **Settings → Rules → Rulesets**, a ruleset targeting the default branch with:
-
-- Require a pull request before merging
-- Require status checks to pass: `test` and `gitleaks`, plus `docker` for the P410 profile
-- Block force pushes
-- Restrict deletions
-
-And under **Settings → Code security**: secret scanning and push protection on.
+Ruleset `protect-main` on the default branch: pull request required; status checks `test`, `gitleaks` and `docker` required; force pushes and deletion blocked. Secret scanning and push protection on.

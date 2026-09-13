@@ -1,35 +1,35 @@
 # Product
 
-Fill this in before any code is written. Work through `docs/intake-checklist.md` first — its answers go here. Keep it short: an agent reads this at the start of every session.
-
----
-
 ## Purpose
 
-<!-- One or two sentences. What problem does this solve, and for whom? -->
+A small page showing the release history of this app: every time a new version starts, it records the version (commit SHA) and start time. It is the pilot for the P410 Docker deployment path — its value is proving that path, not the page itself.
 
 ## Users
 
-<!-- Who uses it, and from which devices or networks. -->
+Brendon, and anyone who visits the hostname. From any network.
 
 ## Hosting profile
 
-<!-- Static site on Cloudflare, or P410 Docker — see docs/deployment-profiles.md. Say why. -->
+P410 Docker. It needs a server process and PostgreSQL.
 
 ## Access
 
-<!-- Public, family-only or owner-only. -->
+Public. The page shows only start times and commit SHAs, which are already public in this repository.
 
 ## Data
 
-<!-- What it stores, whether it is personal or sensitive, and whether it is replaceable. "None" is a valid answer. -->
+Release history in its own `status` database on the P410's PostgreSQL. No personal data. Replaceable: losing it loses only history.
 
 ## Acceptance criteria
 
-<!-- Numbered, testable statements. Each pull request should name the criterion it serves. -->
-
-1.
+1. Merging a passing pull request to `main` publishes an image tagged with the full commit SHA, and the P410 runs it without manual steps.
+2. `GET /healthz` returns `200` with the running version only when the database is reachable, and `503` otherwise.
+3. `GET /` lists releases newest first, and a rollback shows up as an older version starting again.
+4. A release whose health check fails is replaced by the previous version automatically.
+5. The previous release can be restored within 15 minutes.
 
 ## Out of scope
 
-<!-- What this deliberately does not do, so an agent does not build it. -->
+- Accepting any input, forms or authentication
+- Reporting on other apps or services
+- Writing to any database other than its own
