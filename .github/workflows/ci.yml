@@ -1,8 +1,8 @@
 # Required checks for every pull request. Job names are the check names that the
 # main-branch ruleset requires: test, gitleaks, docker.
 #
-# Static-site projects delete the docker job and remove it from the ruleset;
-# Cloudflare builds and deploys them, and adds its own "Workers Builds" check.
+# Publishing the image to GHCR happens in deploy.yml, only after this workflow
+# succeeds on main.
 
 name: CI
 
@@ -22,6 +22,19 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: status_test
+          POSTGRES_HOST_AUTH_METHOD: trust  # throwaway CI database, no password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d status_test"
+          --health-interval 2s --health-timeout 5s --health-retries 15
+    env:
+      TEST_DATABASE_URL: postgres://postgres@localhost:5432/status_test
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -62,12 +75,23 @@ jobs:
           push: false
           tags: app:ci
           build-args: APP_VERSION=${{ github.sha }}
+      - name: Start a throwaway database
+        run: |
+          docker network create ci
+          docker run -d --name db --network ci \
+            -e POSTGRES_DB=status_test -e POSTGRES_HOST_AUTH_METHOD=trust postgres:17-alpine
+          for i in $(seq 1 30); do
+            docker exec db pg_isready -U postgres -d status_test > /dev/null 2>&1 && break
+            sleep 1
+          done
       - name: Start with production hardening and wait for the health check
         run: |
-          docker run -d --name app --read-only --tmpfs /tmp --cap-drop ALL \
+          docker run -d --name app --network ci \
+            -e DATABASE_URL=postgres://postgres@db:5432/status_test \
+            --read-only --tmpfs /tmp --cap-drop ALL \
             --security-opt no-new-privileges:true --memory 256m app:ci
           status=starting
-          for i in $(seq 1 45); do
+          for i in $(seq 1 60); do
             status=$(docker inspect -f '{{.State.Health.Status}}' app)
             [ "$status" = healthy ] && break
             [ "$(docker inspect -f '{{.State.Running}}' app)" = true ] || break
@@ -76,8 +100,10 @@ jobs:
           docker logs app
           echo "health: $status"
           [ "$status" = healthy ]
-      - name: Health endpoint reports the commit
+      - name: Health endpoint and history report the commit
         run: |
           body=$(docker exec app wget -qO- http://127.0.0.1:3000/healthz)
           echo "$body"
           echo "$body" | grep -q '"version":"${{ github.sha }}"'
+          docker exec app wget -qO- http://127.0.0.1:3000/ | grep -q '${{ github.sha }}'
+          test "$(docker exec db psql -U postgres -d status_test -Atc 'SELECT count(*) FROM releases')" = 1

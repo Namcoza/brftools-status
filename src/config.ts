@@ -1,10 +1,9 @@
 // All configuration is read and validated here, once, at startup.
-import { resolve } from "node:path";
 
 export interface Config {
   port: number;
   appVersion: string;
-  publicDir: string;
+  databaseUrl: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -14,9 +13,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`PORT must be an integer between 1 and 65535, got "${env.PORT}"`);
   }
 
+  // Never include the value in the message: it contains the database password.
+  const databaseUrl = env.DATABASE_URL || "";
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL must be set");
+  }
+
   return {
     port,
     appVersion: env.APP_VERSION || "dev",
-    publicDir: resolve(env.PUBLIC_DIR || "public"),
+    databaseUrl,
   };
 }
