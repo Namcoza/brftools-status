@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+.wrangler/
+*.log
+.DS_Store
+
+# Environment files hold real values and must never be committed.
+.env
+.env.*
+!.env.example

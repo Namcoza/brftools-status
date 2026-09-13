@@ -1,0 +1,40 @@
+# Production runtime declaration for the P410 Docker profile.
+# Real values come from the environment on the server — never hard-code
+# hostnames, addresses or secrets here. See docs/deployment-profiles.md.
+
+services:
+  app:
+    image: ${IMAGE:-brftools-template:local}
+    build:
+      context: .
+      args:
+        APP_VERSION: ${APP_VERSION:-dev}
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+
+    # Resource limits are required: this host also runs the family's game servers.
+    mem_limit: 256m
+    cpus: 0.5
+
+    # Hardening. Do not relax without asking.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # No published ports: the reverse proxy reaches the app over the shared network.
+    networks:
+      - edge
+
+    # Persistent data: none.
+    # If the app needs any, declare a named volume here and record it, with its
+    # backup treatment, under "Persistent data" in README.md.
+
+networks:
+  edge:
+    external: true

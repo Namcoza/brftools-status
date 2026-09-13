@@ -1,0 +1,83 @@
+# Required checks for every pull request. Job names are the check names that the
+# main-branch ruleset requires: test, gitleaks, docker.
+#
+# Static-site projects delete the docker job and remove it from the ruleset;
+# Cloudflare builds and deploys them, and adds its own "Workers Builds" check.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write  # lets the action comment on the offending line
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # scan full history, not just the tip
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+
+  docker:
+    name: docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build image (not pushed)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          push: false
+          tags: app:ci
+          build-args: APP_VERSION=${{ github.sha }}
+      - name: Start with production hardening and wait for the health check
+        run: |
+          docker run -d --name app --read-only --tmpfs /tmp --cap-drop ALL \
+            --security-opt no-new-privileges:true --memory 256m app:ci
+          status=starting
+          for i in $(seq 1 45); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' app)
+            [ "$status" = healthy ] && break
+            [ "$(docker inspect -f '{{.State.Running}}' app)" = true ] || break
+            sleep 2
+          done
+          docker logs app
+          echo "health: $status"
+          [ "$status" = healthy ]
+      - name: Health endpoint reports the commit
+        run: |
+          body=$(docker exec app wget -qO- http://127.0.0.1:3000/healthz)
+          echo "$body"
+          echo "$body" | grep -q '"version":"${{ github.sha }}"'

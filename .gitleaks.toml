@@ -1,0 +1,38 @@
+# Secret scanning for a public repository.
+#
+# gitleaks' default rules catch known provider tokens. These additions catch what
+# they miss: home-network detail, tunnel credentials, committed env files and
+# generated passwords that match no provider pattern.
+
+title = "brftools project rules"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "private-ipv4-address"
+description = "Private (RFC 1918) IPv4 address — home network detail"
+regex = '''\b(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})\b'''
+keywords = ["10.", "192.168.", "172."]
+
+[[rules]]
+id = "cloudflare-tunnel-credentials"
+description = "Cloudflare Tunnel secret, tunnel ID or credentials file"
+regex = '''(?i)(?:"?TunnelSecret"?\s*:|"?TunnelID"?\s*:|\btunnel:\s*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'''
+keywords = ["tunnelsecret", "tunnelid", "tunnel:"]
+
+[[rules]]
+id = "env-file-committed"
+description = "A .env file must never be committed — only .env.example"
+path = '''(?:^|/)\.env(?:\.[^/]+)?$'''
+
+[[rules.allowlists]]
+paths = ['''(?:^|/)\.env\.example$''']
+
+[[rules]]
+id = "assigned-credential"
+description = "Non-empty password, secret or token assigned to an upper-case variable"
+# The name must not follow "$" or "{", so a reference like ${DB_PASSWORD:?required} is not a value.
+regex = '''(?:^|[^A-Za-z0-9_${])[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_KEY|PRIVATE_KEY)[A-Z0-9_]*[ \t]*[=:][ \t]*["']?([^\s"'#$][^\s"'#]{7,})'''
+secretGroup = 1
+keywords = ["password", "passwd", "secret", "token", "api_key", "private_key"]
