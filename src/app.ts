@@ -2,6 +2,8 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import type { Config } from "./config.ts";
 import { isDatabaseReachable, listReleases, type Pool, type Release } from "./db.ts";
 
+const COMMIT_URL = "https://github.com/Namcoza/brftools-status/commit/";
+
 export function createApp(config: Config, pool: Pool): Server {
   return createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -35,7 +37,7 @@ export function renderPage(currentVersion: string, releases: Release[]): string 
   const rows = releases
     .map((release) => {
       const current = release.version === currentVersion ? ' class="current"' : "";
-      return `<tr${current}><td>${escapeHtml(release.startedAt.toISOString())}</td><td><code>${escapeHtml(release.version)}</code></td></tr>`;
+      return `<tr${current}><td>${escapeHtml(release.startedAt.toISOString())}</td><td>${versionHtml(release.version)}</td></tr>`;
     })
     .join("\n        ");
 
@@ -62,15 +64,22 @@ export function renderPage(currentVersion: string, releases: Release[]): string 
       th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
       tr.current td { font-weight: 600; }
       code { font-size: 0.85em; word-break: break-all; }
+      a { color: inherit; }
     </style>
   </head>
   <body>
     <h1>Release history</h1>
-    <p>Running version <code>${escapeHtml(currentVersion)}</code>. Each row is one start of the app; rollbacks appear as an older version starting again.</p>
+    <p>Running version ${versionHtml(currentVersion)}. Each row is one start of the app; rollbacks appear as an older version starting again.</p>
     ${table}
   </body>
 </html>
 `;
+}
+
+// A full commit SHA links to that commit; anything else (such as "dev") is plain text.
+function versionHtml(version: string): string {
+  const code = `<code>${escapeHtml(version)}</code>`;
+  return /^[0-9a-f]{40}$/.test(version) ? `<a href="${COMMIT_URL}${version}">${code}</a>` : code;
 }
 
 function escapeHtml(value: string): string {

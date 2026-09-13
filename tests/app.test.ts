@@ -31,6 +31,14 @@ describe("renderPage", () => {
   test("shows an empty state", () => {
     assert.match(renderPage("abc", []), /No releases recorded yet/);
   });
+
+  test("links full commit SHAs to the commit, and nothing else", () => {
+    const sha = "2ad0e8538975fb97ae7f66cf55c0f83e3de8febd";
+    const html = renderPage(sha, [{ version: sha, startedAt: new Date("2026-09-13T10:00:00Z") }]);
+    const link = `<a href="https://github.com/Namcoza/brftools-status/commit/${sha}"><code>${sha}</code></a>`;
+    assert.equal(html.split(link).length - 1, 2, "running version and table row are both linked");
+    assert.doesNotMatch(renderPage("dev", []), /<a href=/);
+  });
 });
 
 describe("with a database", { skip: skipDatabase }, () => {
