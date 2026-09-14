@@ -3,7 +3,20 @@ import { readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
 import { AccessError, type AccessVerifier } from "./access.ts";
-import { ago, detailList, escapeHtml, page } from "./html.ts";
+import {
+  ago,
+  breadcrumbs,
+  detailList,
+  escapeHtml,
+  FAVICON_SVG,
+  glyph,
+  logBlock,
+  page,
+  statusPill,
+  type Crumb,
+  type NavLinks,
+  type Tone,
+} from "./html.ts";
 import type { MinecraftServerConfig, ServerStatus } from "./minecraft.ts";
 
 // The private Minecraft admin menu, served only on the admin hostname and only to requests that
@@ -21,14 +34,30 @@ export const ACTIONS = {
 
 export type Action = keyof typeof ACTIONS;
 
+// What the runner does for each action, in order, so progress reads as steps rather than a state.
+const STEP_PLANS: Record<Action, string[]> = {
+  save: ["Saving the world"],
+  restart: ["Warning players", "Saving the world", "Restarting the server", "Waiting for healthy"],
+  stop: ["Warning players", "Saving the world", "Stopping the server"],
+  start: ["Starting the server", "Waiting for healthy"],
+};
+
+// The runner's own step names, mapped onto the plan above.
+const STEP_NAMES: Record<string, string> = {
+  "warning players": "Warning players",
+  saving: "Saving the world",
+  restarting: "Restarting the server",
+  stopping: "Stopping the server",
+  starting: "Starting the server",
+  "waiting for healthy": "Waiting for healthy",
+};
+
 const REQUEST_ID = /^[0-9a-f]{32}$/;
 const REQUEST_FILE = /^[0-9a-f]{32}\.json$/;
 // The runner gives up on a request after 45 minutes, so an older "running" result is abandoned.
 const RUNNING_STALE_MS = 45 * 60_000;
 // The host writes server state every 30 seconds.
 const SNAPSHOT_STALE_MS = 2 * 60_000;
-
-type Tone = "online" | "warning" | "offline";
 
 export interface ServerSnapshot {
   generatedAt: Date | null;
@@ -123,6 +152,8 @@ export interface AdminOptions {
   minecraft: () => ServerStatus[];
   inboxDir: string;
   stateDir: string;
+  // Header and footer links; statusUrl is the public status page.
+  nav?: { statusUrl: string; gamesUrl: string; mapUrl: string };
   now?: () => Date;
 }
 
@@ -130,6 +161,12 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
   const { hostname, verifier, servers, inboxDir, stateDir } = options;
   const now = options.now ?? (() => new Date());
   const origin = `https://${hostname}`;
+  const nav: NavLinks = {
+    status: options.nav?.statusUrl || "/",
+    games: options.nav?.gamesUrl ?? "",
+    map: options.nav?.mapUrl ?? "",
+  };
+  const crumbRoot = (): Crumb[] => [{ label: "Status", href: nav.status }, { label: "Servers", href: "/" }];
 
   const snapshotOf = (id: string) => readParsed(join(stateDir, "servers", `${id}.json`), parseSnapshot);
   const resultOf = (requestId: string) => readParsed(join(stateDir, "results", `${requestId}.json`), parseResult);
@@ -171,6 +208,10 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
     return header(req, "origin") === origin;
   }
 
+  function adminPage(title: string, body: string, refreshSeconds?: number): string {
+    return page({ title: `${title} · Minecraft admin`, body, refreshSeconds, nav, faviconUrl: "/favicon.svg" });
+  }
+
   async function overviewPage(email: string): Promise<string> {
     const [entries, current] = await Promise.all([history(), inProgress()]);
     const t = now();
@@ -185,20 +226,20 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
           const when = last.finishedAt ? `, ${ago(last.finishedAt, t)} ago` : "";
           details.push(["Last action", `${escapeHtml(`${actionLabel(last.action)}: ${outcome(last.status, last.step)}`)}${when}`]);
         }
-        return `<section class="server">
-        <h3><a class="card-link" href="/servers/${escapeHtml(server.id)}">${escapeHtml(server.name)}</a></h3>
-        <span class="state ${state.tone}">${state.label}</span>
-        ${detailList(details)}
-      </section>`;
+        return `<section class="card">
+          <div class="card-head"><h3><a class="cover" href="/servers/${escapeHtml(server.id)}">${escapeHtml(server.name)}</a></h3>${statusPill(state.tone, state.label)}</div>
+          ${detailList(details)}
+        </section>`;
       }),
     );
-    const body = `<h1>Minecraft admin</h1>
-    <p class="note">Signed in as ${escapeHtml(email)}.</p>
-    ${current ? `<p>An action is in progress: <a href="/actions/${current}">view its progress</a>.</p>` : ""}
-    <div class="servers">
-      ${cards.join("\n      ")}
-    </div>`;
-    return page({ title: "Minecraft admin", body, refreshSeconds: 30 });
+    const body = `${breadcrumbs([{ label: "Status", href: nav.status }, { label: "Servers" }])}
+      <h1>Minecraft admin</h1>
+      <p class="meta">Signed in as ${escapeHtml(email)}.</p>
+      ${current ? `<p>An action is in progress: <a href="/actions/${current}">view its progress</a>.</p>` : ""}
+      <div class="cards">
+        ${cards.join("\n        ")}
+      </div>`;
+    return adminPage("Servers", body, 30);
   }
 
   async function serverPage(server: MinecraftServerConfig, email: string): Promise<string> {
@@ -210,21 +251,21 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
 
     const details: [string, string][] = [["Players", playersHtml(status)]];
     if (status?.state === "online" && status.result?.version) details.push(["Version", escapeHtml(status.result.version)]);
-    if (snapshot?.running && snapshot.startedAt) details.push(["Up for", ago(snapshot.startedAt, t)]);
+    if (snapshot?.running && snapshot.startedAt) details.push(["Uptime", ago(snapshot.startedAt, t)]);
     if (snapshot && !snapshot.running && snapshot.stoppedBy) details.push(["Stopped by", stoppedHtml(snapshot, t)]);
 
     let actions: string;
     if (current) {
       actions = `<p>Another action is in progress: <a href="/actions/${current}">view its progress</a>.</p>`;
     } else if (!snapshot?.exists) {
-      actions = `<p class="note">Actions are unavailable until the host reports this server's state.</p>`;
+      actions = `<p class="meta">Actions are unavailable until the host reports this server's state.</p>`;
     } else {
       const available = (Object.keys(ACTIONS) as Action[]).filter((action) => ACTIONS[action].whenRunning === snapshot.running);
       actions = `<div class="actions">${available
-        .map((action) =>
+        .map((action, index) =>
           ACTIONS[action].disruptive
-            ? `<a class="button danger" href="/servers/${id}/confirm?action=${action}">${ACTIONS[action].label}…</a>`
-            : actionForm(server, action, ACTIONS[action].label, false),
+            ? `<a class="btn btn-danger" href="/servers/${id}/confirm?action=${action}">${ACTIONS[action].label}…</a>`
+            : actionForm(server, action, ACTIONS[action].label, index === 0 ? "btn-primary" : ""),
         )
         .join("")}</div>`;
     }
@@ -237,31 +278,28 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
           `<tr><td>${entry.finishedAt ? `${ago(entry.finishedAt, t)} ago` : ""}</td><td>${escapeHtml(actionLabel(entry.action))}</td><td>${escapeHtml(outcome(entry.status, entry.step))}</td><td>${escapeHtml(entry.requestedBy)}</td></tr>`,
       );
     const table = rows.length
-      ? `<table><thead><tr><th>When</th><th>Action</th><th>Result</th><th>By</th></tr></thead><tbody>${rows.join("")}</tbody></table>`
-      : `<p class="note">No actions yet.</p>`;
+      ? `<table class="table"><thead><tr><th>When</th><th>Action</th><th>Result</th><th>By</th></tr></thead><tbody>${rows.join("")}</tbody></table>`
+      : `<p class="meta">No actions yet.</p>`;
 
     const stale =
       snapshot?.generatedAt && t.getTime() - snapshot.generatedAt.getTime() > SNAPSHOT_STALE_MS
-        ? `<p class="note">Server state last updated ${ago(snapshot.generatedAt, t)} ago; the host snapshot may have stopped.</p>`
+        ? `<p class="meta">Server state last updated ${ago(snapshot.generatedAt, t)} ago; the host snapshot may have stopped.</p>`
         : "";
-    const log = snapshot?.log.length
-      ? `<pre class="log">${escapeHtml(snapshot.log.join("\n"))}</pre>`
-      : `<p class="note">No log available.</p>`;
 
-    const body = `<p><a href="/">← All servers</a></p>
-    <h1>${escapeHtml(server.name)}</h1>
-    <span class="state ${state.tone}">${state.label}</span>
-    ${detailList(details)}
-    ${stale}
-    <h2>Actions</h2>
-    ${actions}
-    <h2>Recent actions</h2>
-    ${table}
-    <h2>Recent log</h2>
-    <p class="note">Last 50 lines, with IP addresses removed.</p>
-    ${log}
-    <p class="note">Signed in as ${escapeHtml(email)}.</p>`;
-    return page({ title: `${server.name} · Minecraft admin`, body, refreshSeconds: 30 });
+    const body = `${breadcrumbs([...crumbRoot(), { label: server.name }])}
+      <h1>${escapeHtml(server.name)}</h1>
+      <p>${statusPill(state.tone, state.label)}</p>
+      ${detailList(details)}
+      ${stale}
+      <h2>Actions</h2>
+      ${actions}
+      <h2>Recent actions</h2>
+      ${table}
+      <h2>Recent log</h2>
+      <p class="meta">Last 50 lines, with IP addresses removed.</p>
+      ${snapshot?.log.length ? logBlock(snapshot.log) : `<p class="meta">No log available.</p>`}
+      <p class="meta">Signed in as ${escapeHtml(email)}.</p>`;
+    return adminPage(server.name, body, 30);
   }
 
   function confirmPage(server: MinecraftServerConfig, action: Action): string {
@@ -280,16 +318,16 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
       start: "The server starts. It is usually ready within two minutes.",
     };
     const id = escapeHtml(server.id);
-    const body = `<p><a href="/servers/${id}">← ${escapeHtml(server.name)}</a></p>
-    <h1>${label} ${escapeHtml(server.name)}?</h1>
-    ${disruptive ? who : ""}
-    <p>${what[action]}</p>
-    ${disruptive ? `<p class="note">Player counts can be up to 30 seconds old; the host checks again before acting.</p>` : ""}
-    <div class="actions">
-      ${actionForm(server, action, `${label} now`, disruptive)}
-      <a class="button" href="/servers/${id}">Cancel</a>
-    </div>`;
-    return page({ title: `${label} ${server.name}? · Minecraft admin`, body });
+    const body = `${breadcrumbs([...crumbRoot(), { label: server.name, href: `/servers/${server.id}` }, { label }])}
+      <h1>${label} ${escapeHtml(server.name)}?</h1>
+      ${disruptive ? who : ""}
+      <p>${what[action]}</p>
+      ${disruptive ? `<p class="meta">Player counts can be up to 30 seconds old; the host checks again before acting.</p>` : ""}
+      <div class="actions">
+        ${actionForm(server, action, `${label} now`, disruptive ? "btn-danger" : "btn-primary")}
+        <a class="btn" href="/servers/${id}">Cancel</a>
+      </div>`;
+    return adminPage(`${label} ${server.name}?`, body);
   }
 
   async function progressPage(requestId: string): Promise<string> {
@@ -299,52 +337,62 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
 
     const finished = result !== null && result.status in FINISHED;
     const { label, tone } = !result
-      ? { label: queued ? "Queued" : "Waiting for the host", tone: "warning" as Tone }
-      : (FINISHED[result.status] ?? { label: "In progress", tone: "warning" as Tone });
+      ? { label: queued ? "Queued" : "Waiting for the host", tone: "warn" as Tone }
+      : (FINISHED[result.status] ?? { label: "In progress", tone: "warn" as Tone });
+
+    const action = result ? actionFrom(result.action) : null;
+    const steps = action && result && result.status !== "rejected" ? stepList(action, result) : "";
 
     const details: [string, string][] = [];
-    if (result?.step) details.push(["Step", escapeHtml(capitalise(result.step))]);
-    if (result?.detail && result.status !== "failed") details.push(["Detail", escapeHtml(result.detail)]);
+    // With steps, the current step already carries the step name and its detail.
+    if (!steps && result?.step) details.push(["Step", escapeHtml(capitalise(result.step))]);
+    if (!steps && result?.detail && result.status !== "failed") details.push(["Detail", escapeHtml(result.detail)]);
     if (result?.requestedBy) details.push(["Requested by", escapeHtml(result.requestedBy)]);
     if (result?.updatedAt) details.push(["Updated", `${ago(result.updatedAt, t)} ago`]);
-    const failure =
-      result?.status === "failed" && result.detail ? `<h2>Recent log</h2><pre class="log">${escapeHtml(result.detail)}</pre>` : "";
+    const failure = result?.status === "failed" && result.detail ? `<h2>Recent log</h2>${logBlock(result.detail.split("\n"))}` : "";
 
     const title = result ? `${actionLabel(result.action)}: ${server?.name ?? result.server}` : "Action";
-    const back = server
-      ? `<a href="/servers/${escapeHtml(server.id)}">← ${escapeHtml(server.name)}</a>`
-      : `<a href="/">← All servers</a>`;
-    const body = `<p>${back}</p>
-    <h1>${escapeHtml(title)}</h1>
-    <span class="state ${tone}">${label}</span>
-    ${detailList(details)}
-    ${finished ? "" : `<p class="note">This page refreshes every 3 seconds.</p>`}
-    ${failure}`;
-    return page({ title: `${title} · Minecraft admin`, body, refreshSeconds: finished ? undefined : 3 });
+    const crumbs: Crumb[] = server
+      ? [...crumbRoot(), { label: server.name, href: `/servers/${server.id}` }, { label: actionLabel(result?.action ?? "") }]
+      : [...crumbRoot(), { label: "Action" }];
+
+    const body = `${breadcrumbs(crumbs)}
+      <h1>${escapeHtml(title)}</h1>
+      <p>${statusPill(tone, label)}</p>
+      ${steps}
+      ${detailList(details)}
+      ${finished ? "" : `<p class="meta">This page refreshes every 3 seconds.</p>`}
+      ${failure}
+      <div class="actions">${server ? `<a class="btn" href="/servers/${escapeHtml(server.id)}">Back to ${escapeHtml(server.name)}</a>` : `<a class="btn" href="/">All servers</a>`}</div>`;
+    return adminPage(title, body, finished ? undefined : 3);
   }
 
   async function postAction(req: IncomingMessage, res: ServerResponse, server: MinecraftServerConfig, email: string) {
-    const back = `<a href="/servers/${escapeHtml(server.id)}">Back to ${escapeHtml(server.name)}</a>`;
+    const back = `<a class="btn" href="/servers/${escapeHtml(server.id)}">Back to ${escapeHtml(server.name)}</a>`;
     if (!sameOrigin(req)) {
       console.error(`admin: refused cross-site POST for ${server.id} (${JSON.stringify(email)})`);
-      return sendHtml(res, 403, messagePage("Refused", "The request did not come from the admin menu itself."));
+      return sendHtml(res, 403, messagePage("Refused", "The request did not come from the admin menu itself.", "bad"));
     }
     const body = await readBody(req, 1024);
-    if (body === null) return sendHtml(res, 413, messagePage("Too large", back));
+    if (body === null) return sendHtml(res, 413, messagePage("Too large", back, "bad"));
     const action = actionFrom(new URLSearchParams(body).get("action"));
-    if (!action) return sendHtml(res, 400, messagePage("Unknown action", back));
+    if (!action) return sendHtml(res, 400, messagePage("Unknown action", back, "bad"));
 
     const snapshot = await snapshotOf(server.id);
     if (!snapshot?.exists) {
-      return sendHtml(res, 409, messagePage("Not possible right now", `The host has not reported this server's state. ${back}`));
+      return sendHtml(res, 409, messagePage("Not possible right now", `The host has not reported this server's state. ${back}`, "warn"));
     }
     if (ACTIONS[action].whenRunning !== snapshot.running) {
       const why = snapshot.running ? "is already running" : "is not running";
-      return sendHtml(res, 409, messagePage("Not possible right now", `${escapeHtml(server.name)} ${why}. ${back}`));
+      return sendHtml(res, 409, messagePage("Not possible right now", `${escapeHtml(server.name)} ${why}. ${back}`, "warn"));
     }
     const current = await inProgress();
     if (current) {
-      return sendHtml(res, 409, messagePage("Another action is in progress", `<a href="/actions/${current}">View its progress</a>`));
+      return sendHtml(
+        res,
+        409,
+        messagePage("Another action is in progress", `<a class="btn btn-primary" href="/actions/${current}">Watch progress</a>`, "warn"),
+      );
     }
 
     const requestId = await submit(server, action, email);
@@ -353,7 +401,23 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
     res.end();
   }
 
+  function messagePage(title: string, html: string, tone: Tone = "bad"): string {
+    const body = `${breadcrumbs(crumbRoot())}
+      <p class="state ${tone}">${glyph(tone)}</p>
+      <h1>${escapeHtml(title)}</h1>
+      <p>${html}</p>`;
+    return adminPage(title, body);
+  }
+
   return async (req, res) => {
+    const url = new URL(req.url ?? "/", origin);
+
+    if (req.method === "GET" && url.pathname === "/favicon.svg") {
+      res.writeHead(200, { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" });
+      res.end(FAVICON_SVG);
+      return;
+    }
+
     let email: string;
     try {
       email = (await verifier.verify(header(req, "cf-access-jwt-assertion"))).email;
@@ -363,7 +427,6 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
       return sendHtml(res, 403, messagePage("Forbidden", "Sign in through Cloudflare Access to use the admin menu."));
     }
 
-    const url = new URL(req.url ?? "/", origin);
     const [section, name, sub, ...rest] = url.pathname.split("/").filter(Boolean);
     const server = section === "servers" ? servers.find((candidate) => candidate.id === name) : undefined;
 
@@ -379,25 +442,46 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
         return sendHtml(res, 200, await progressPage(name));
       }
     }
-    return sendHtml(res, 404, messagePage("Not found", `<a href="/">Back to the admin menu</a>`));
+    return sendHtml(res, 404, messagePage("Not found", `<a class="btn" href="/">All servers</a>`));
   };
+
+  // Steps read as a list: filled = done, outlined = current, dashed = still to come.
+  function stepList(action: Action, result: ActionResult): string {
+    const plan = STEP_PLANS[action];
+    const currentLabel = STEP_NAMES[result.step] ?? "";
+    const done = result.status === "done";
+    const at = done ? plan.length : Math.max(0, plan.indexOf(currentLabel));
+    const items = plan.map((label, index) => {
+      const state =
+        index < at
+          ? { tone: "ok" as Tone, word: "Done" }
+          : index > at
+            ? { tone: "idle" as Tone, word: "Queued" }
+            : result.status === "failed"
+              ? { tone: "bad" as Tone, word: "Failed" }
+              : { tone: "warn" as Tone, word: "In progress" };
+      const note = index === at && !done && result.detail ? ` · ${escapeHtml(result.detail)}` : "";
+      return `<li><span class="state ${state.tone}">${glyph(state.tone)}</span><span><span class="label">${escapeHtml(label)}</span><span class="meta">${state.word}${note}</span></span></li>`;
+    });
+    return `<ol class="steps">${items.join("")}</ol>`;
+  }
 }
 
 const FINISHED: Record<string, { label: string; tone: Tone }> = {
-  done: { label: "Done", tone: "online" },
-  failed: { label: "Failed", tone: "offline" },
-  rejected: { label: "Refused", tone: "offline" },
+  done: { label: "Done", tone: "ok" },
+  failed: { label: "Failed", tone: "bad" },
+  rejected: { label: "Refused", tone: "bad" },
 };
 
 const OUTCOMES: Record<string, string> = { done: "Done", failed: "Failed", rejected: "Refused", running: "In progress" };
 
 function stateOf(snapshot: ServerSnapshot | null): { label: string; tone: Tone } {
-  if (!snapshot) return { label: "No data from the host", tone: "offline" };
-  if (!snapshot.exists) return { label: "Container missing", tone: "offline" };
-  if (!snapshot.running) return { label: "Stopped", tone: "offline" };
-  if (snapshot.health === "starting") return { label: "Starting", tone: "warning" };
-  if (snapshot.health === "unhealthy") return { label: "Running, unhealthy", tone: "offline" };
-  return { label: "Running", tone: "online" };
+  if (!snapshot) return { label: "No data from the host", tone: "bad" };
+  if (!snapshot.exists) return { label: "Container missing", tone: "bad" };
+  if (!snapshot.running) return { label: "Stopped", tone: "bad" };
+  if (snapshot.health === "starting") return { label: "Starting", tone: "warn" };
+  if (snapshot.health === "unhealthy") return { label: "Running, unhealthy", tone: "bad" };
+  return { label: "Running", tone: "ok" };
 }
 
 function playersHtml(status: ServerStatus | undefined): string {
@@ -414,8 +498,9 @@ function stoppedHtml(snapshot: ServerSnapshot, now: Date): string {
   return `${escapeHtml(snapshot.stoppedBy)}${snapshot.stoppedAt ? `, ${ago(snapshot.stoppedAt, now)} ago` : ""}`;
 }
 
-function actionForm(server: MinecraftServerConfig, action: Action, text: string, danger: boolean): string {
-  return `<form method="post" action="/servers/${escapeHtml(server.id)}/actions"><input type="hidden" name="action" value="${action}" /><button type="submit"${danger ? ' class="danger"' : ""}>${escapeHtml(text)}</button></form>`;
+function actionForm(server: MinecraftServerConfig, action: Action, text: string, variant: string): string {
+  const cls = variant ? `btn ${variant}` : "btn";
+  return `<form method="post" action="/servers/${escapeHtml(server.id)}/actions"><input type="hidden" name="action" value="${action}" /><button class="${cls}" type="submit">${escapeHtml(text)}</button></form>`;
 }
 
 function actionFrom(value: string | null): Action | null {
@@ -436,16 +521,14 @@ function capitalise(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
-function messagePage(title: string, html: string): string {
-  return page({ title, body: `<h1>${escapeHtml(title)}</h1>\n    <p>${html}</p>` });
-}
-
 function sendHtml(res: ServerResponse, status: number, html: string): void {
   res.writeHead(status, {
     "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store",
     // No scripts, no framing (so the buttons cannot be clickjacked), forms only to this origin.
-    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    // img-src 'self' is only for this app's own favicon.
+    "content-security-policy":
+      "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     "referrer-policy": "same-origin",
   });
   res.end(html);

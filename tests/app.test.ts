@@ -37,7 +37,7 @@ describe("renderPage", () => {
       { version: "abc", startedAt: new Date("2026-09-13T10:00:00Z") },
       { version: "<script>", startedAt: new Date("2026-09-12T10:00:00Z") },
     ]);
-    assert.match(html, /<tr class="current"><td>2026-09-13T10:00:00.000Z<\/td><td><code>abc<\/code>/);
+    assert.match(html, /<tr class="current"><td>2026-09-13 10:00<\/td><td><code>abc<\/code>/);
     assert.match(html, /&lt;script&gt;/);
     assert.doesNotMatch(html, /<script>/);
   });
@@ -49,9 +49,10 @@ describe("renderPage", () => {
   test("links full commit SHAs to the commit, and nothing else", () => {
     const sha = "2ad0e8538975fb97ae7f66cf55c0f83e3de8febd";
     const html = renderPage(sha, [{ version: sha, startedAt: new Date("2026-09-13T10:00:00Z") }]);
-    const link = `<a href="https://github.com/Namcoza/brftools-status/commit/${sha}"><code>${sha}</code></a>`;
+    // The full SHA is the link; the short form is what the reader sees.
+    const link = `<a href="https://github.com/Namcoza/brftools-status/commit/${sha}"><code>2ad0e85</code></a>`;
     assert.equal(html.split(link).length - 1, 2, "running version and table row are both linked");
-    assert.doesNotMatch(renderPage("dev", []), /<a href=/);
+    assert.doesNotMatch(renderPage("dev", []), /commit\//);
   });
 
   test("omits the Minecraft section when no servers are configured", () => {
@@ -73,13 +74,14 @@ describe("renderPage", () => {
       now,
     });
     assert.match(html, /<h2>Minecraft<\/h2>/);
-    assert.match(html, /<h3>Family Server<\/h3>\s*<span class="state online">Online<\/span>/);
+    assert.match(html, /<h3>Family Server<\/h3><span class="state ok">(<svg[^>]*>.*?<\/svg>)?Online<\/span>/);
     assert.match(html, /<dt>Players<\/dt><dd>3 \/ 20<\/dd><dt>Version<\/dt><dd>26.2<\/dd>/);
     assert.match(html, /<dt>Join<\/dt><dd>Java family.example:25565<\/dd>/);
     assert.match(html, /<a href="https:\/\/map.example\/">Open the map<\/a>/);
     assert.match(html, /Checked 12 s ago/);
     // Offline: falls back to the configured name, and shows no stale counts.
-    assert.match(html, /<h3>Crossplay<\/h3>\s*<span class="state offline">Offline<\/span>\s*<p class="checked">Checked 5 s ago/);
+    assert.match(html, /<h3>Crossplay<\/h3><span class="state bad">/);
+    assert.match(html, /Offline<\/span><\/div>\s*<p class="meta">Checked 5 s ago/);
     assert.ok(html.indexOf("<h2>Minecraft</h2>") < html.indexOf("<h2>Release history</h2>"));
     // Names from the ping are for the private admin menu only.
     assert.doesNotMatch(html, /KidExample/);
@@ -88,9 +90,9 @@ describe("renderPage", () => {
   test("links each card to the admin menu when it is configured, keeping the map link", () => {
     const minecraft: ServerStatus[] = [{ server: family, state: "offline", checkedAt: null, result: null }];
     const html = renderPage("dev", [], { minecraft, adminUrl: "https://admin.example.com" });
-    assert.match(html, /<h3><a class="card-link" href="https:\/\/admin.example.com\/servers\/family">Family<\/a><\/h3>/);
+    assert.match(html, /<h3><a class="cover" href="https:\/\/admin.example.com\/servers\/family">Family<\/a><\/h3>/);
     assert.match(html, /<a href="https:\/\/map.example\/">Open the map<\/a>/);
-    assert.doesNotMatch(renderPage("dev", [], { minecraft }), /class="card-link"/);
+    assert.doesNotMatch(renderPage("dev", [], { minecraft }), /class="cover"/);
   });
 
   test("escapes values reported by a Minecraft server", () => {
@@ -131,13 +133,15 @@ describe("renderPage: Tailscale", () => {
 
   test("shows a connected host with its relay and devices, above the release history", () => {
     const html = renderPage("dev", [], { tailscale: { state: "connected", snapshot }, now });
-    assert.match(html, /<h2>Tailscale<\/h2>/);
-    assert.match(html, /<span class="state online">Connected<\/span>/);
+    assert.match(html, /<h2>Remote access<\/h2>/);
+    assert.match(html, /<span class="state ok">(<svg[^>]*>.*?<\/svg>)?Connected<\/span>/);
     assert.match(html, /<dt>Relay<\/dt><dd>LHR<\/dd>/);
-    assert.match(html, /<li>laptop-example <span>macOS · online<\/span><\/li>/);
-    assert.match(html, /<li>phone-example <span>iOS · offline, last seen 25 min ago<\/span><\/li>/);
+    // Folded to a count by default, so a phone shows the state first.
+    assert.match(html, /<summary>2 devices · 1 online<\/summary>/);
+    assert.match(html, /<li><span>laptop-example<\/span><span class="who">macOS · online<\/span><\/li>/);
+    assert.match(html, /<li><span>phone-example<\/span><span class="who">iOS · offline, last seen 25 min ago<\/span><\/li>/);
     assert.match(html, /Updated 30 s ago/);
-    assert.ok(html.indexOf("<h2>Tailscale</h2>") < html.indexOf("<h2>Release history</h2>"));
+    assert.ok(html.indexOf("<h2>Remote access</h2>") < html.indexOf("<h2>Release history</h2>"));
   });
 
   test("lists health warnings, escaped", () => {
@@ -145,7 +149,7 @@ describe("renderPage: Tailscale", () => {
       tailscale: { state: "degraded", snapshot: { ...snapshot, health: ["<b>DNS</b> unreachable"] } },
       now,
     });
-    assert.match(html, /<span class="state warning">Connected, with warnings<\/span>/);
+    assert.match(html, /<span class="state warn">(<svg[^>]*>.*?<\/svg>)?Connected, with warnings<\/span>/);
     assert.match(html, /<dt>Warning<\/dt><dd>&lt;b&gt;DNS&lt;\/b&gt; unreachable<\/dd>/);
     assert.doesNotMatch(html, /<b>/);
   });
@@ -154,7 +158,7 @@ describe("renderPage: Tailscale", () => {
     const page = (tailscale: TailscaleView) => renderPage("dev", [], { tailscale, now });
     assert.match(
       page({ state: "down", snapshot: { ...snapshot, backendState: "NeedsLogin", online: false } }),
-      /<span class="state offline">Needs login<\/span>/,
+      /<span class="state bad">(<svg[^>]*>.*?<\/svg>)?Needs login<\/span>/,
     );
     assert.match(page({ state: "down", snapshot: { ...snapshot, online: false } }), /Not connected to Tailscale/);
     assert.match(
@@ -162,15 +166,15 @@ describe("renderPage: Tailscale", () => {
         state: "down",
         snapshot: { ...snapshot, backendState: "Unavailable", online: false, error: "tailscale status failed (exit 1)", relay: "", peers: [] },
       }),
-      /Not responding<\/span>\s*<dl><dt>Error<\/dt><dd>tailscale status failed \(exit 1\)<\/dd><\/dl>/,
+      /Not responding<\/span>[\s\S]*<dt>Error<\/dt><dd>tailscale status failed \(exit 1\)<\/dd>/,
     );
     assert.match(
       page({ state: "stale", snapshot: { ...snapshot, generatedAt: new Date("2026-09-14T11:10:00Z") } }),
-      /<span class="state warning">No recent update<\/span>[\s\S]*Updated 60 min ago/,
+      /<span class="state warn">(<svg[^>]*>.*?<\/svg>)?No recent update<\/span>[\s\S]*Updated 60 min ago/,
     );
     assert.match(
       page({ state: "missing", snapshot: null }),
-      /<span class="state offline">No data<\/span>[\s\S]*Status file missing or unreadable/,
+      /<span class="state bad">(<svg[^>]*>.*?<\/svg>)?No data<\/span>[\s\S]*Status file missing or unreadable/,
     );
   });
 });
@@ -234,8 +238,8 @@ describe("with a database", { skip: skipDatabase }, () => {
     const html = await res.text();
     assert.match(html, /test-sha/);
     assert.match(html, /older-sha/);
-    assert.match(html, /<span class="state offline">Offline<\/span>/);
-    assert.match(html, /<span class="state offline">No data<\/span>/);
+    assert.match(html, /<span class="state bad">(<svg[^>]*>.*?<\/svg>)?Offline<\/span>/);
+    assert.match(html, /<span class="state bad">(<svg[^>]*>.*?<\/svg>)?No data<\/span>/);
   });
 
   test("unknown paths return 404", async () => {

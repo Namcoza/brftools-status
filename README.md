@@ -57,6 +57,12 @@ compose.yml          production runtime declaration
 .github/workflows/   ci.yml (required checks), deploy.yml (publish image)
 ```
 
+## Design
+
+Pages follow the brftools design canvas: one mark, one set of light/dark tokens, and one navigation model — a `Status` button in the header of every surface that returns to the public status page, breadcrumbs for depth, and a footer that links the surfaces to each other. `src/html.ts` holds the shell, tokens and components; nothing else defines colour or spacing.
+
+Constraints that shape it: system fonts, inline CSS and inline SVG only (the admin menu allows no scripts, web fonts or external stylesheets), square corners, one hairline border weight, no shadows, and no animation — every page reloads itself on a timer, so a reload has to be invisible. State always reads as a word, a shape and a colour together, and the status colours meet WCAG AA in both themes.
+
 ## Hosting profile
 
 **P410 Docker.** See [`docs/deployment-profiles.md`](docs/deployment-profiles.md), Profile B.
@@ -79,6 +85,9 @@ compose.yml          production runtime declaration
 | `ACCESS_AUD` | Audience tag of the Access application protecting `ADMIN_HOSTNAME` | none |
 | `MC_ACTIONS_INBOX_DIR` | Absolute path, inside the container, of the runner's inbox (writable) | none |
 | `MC_ACTIONS_STATE_DIR` | Absolute path, inside the container, of the runner's state (read-only) | none |
+| `PUBLIC_STATUS_URL` | Absolute URL of the public status page, used by the header's Status button and the footer. Falls back to `/` | none |
+| `PUBLIC_GAMES_URL` | Absolute URL of the games hub, for the footer. Omitted when unset | none |
+| `PUBLIC_MAP_URL` | Absolute URL of the world map, for the footer. Omitted when unset | none |
 
 Real values never go in the repository. In production, `.env` is rendered from 1Password at deploy time.
 

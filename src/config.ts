@@ -10,6 +10,13 @@ export interface AdminConfig {
   stateDir: string;
 }
 
+// Links in the shared header and footer, so every surface knows about the others.
+export interface NavConfig {
+  statusUrl: string;
+  gamesUrl: string;
+  mapUrl: string;
+}
+
 export interface Config {
   port: number;
   appVersion: string;
@@ -17,6 +24,7 @@ export interface Config {
   minecraftServers: MinecraftServerConfig[];
   tailscaleStatusFile: string;
   admin: AdminConfig | null;
+  nav: NavConfig;
 }
 
 const MAX_MINECRAFT_SERVERS = 4;
@@ -51,7 +59,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     minecraftServers,
     tailscaleStatusFile,
     admin: loadAdmin(env, minecraftServers),
+    nav: loadNav(env),
   };
+}
+
+// Absolute URLs for the header and footer. Unset links are simply left out; the Status link
+// falls back to "/" so the public page always has its own anchor.
+function loadNav(env: NodeJS.ProcessEnv): NavConfig {
+  const urls = { statusUrl: env.PUBLIC_STATUS_URL || "", gamesUrl: env.PUBLIC_GAMES_URL || "", mapUrl: env.PUBLIC_MAP_URL || "" };
+  for (const [key, value] of Object.entries(urls)) {
+    const name = `PUBLIC_${key.replace(/Url$/, "").toUpperCase()}_URL`;
+    if (value && !/^https?:$/.test(URL.parse(value)?.protocol ?? "")) {
+      throw new Error(`${name} must be an http or https URL, got "${value}"`);
+    }
+  }
+  return urls;
 }
 
 // Servers are numbered MC_1_* to MC_4_*. A server exists when its MC_n_PING is set.
