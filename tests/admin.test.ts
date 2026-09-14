@@ -155,16 +155,18 @@ describe("admin menu pages", () => {
   test("the overview shows each server's state and who is online, by name", async () => {
     const { status, body } = await get("/");
     assert.equal(status, 200);
-    assert.match(body, /<a class="card-link" href="\/servers\/family">Family<\/a>/);
-    assert.match(body, /<span class="state online">Running<\/span>/);
+    assert.match(body, /<a class="cover" href="\/servers\/family">Family<\/a>/);
+    assert.match(body, /<span class="state ok">(<svg[^>]*>.*?<\/svg>)?Running<\/span>/);
+    // One anchor back to the public status page, on every admin surface.
+    assert.match(body, /<a class="btn btn-small" href="\/">Status<\/a>/);
     assert.match(body, /2 \/ 20 — KidOne, KidTwo/);
     assert.match(body, /Signed in as owner@example.com/);
   });
 
   test("a running server offers save, restart and stop, and shows its log escaped", async () => {
     const { body } = await get("/servers/family");
-    assert.match(body, /<input type="hidden" name="action" value="save" \/><button type="submit">Save world<\/button>/);
-    assert.match(body, /href="\/servers\/family\/confirm\?action=restart"/);
+    assert.match(body, /<input type="hidden" name="action" value="save" \/><button class="btn btn-primary" type="submit">Save world<\/button>/);
+    assert.match(body, /class="btn btn-danger" href="\/servers\/family\/confirm\?action=restart"/);
     assert.match(body, /href="\/servers\/family\/confirm\?action=stop"/);
     assert.doesNotMatch(body, /value="start"/);
     assert.match(body, /Version<\/dt><dd>26.2/);
@@ -180,7 +182,7 @@ describe("admin menu pages", () => {
       stopped: { stoppedBy: "owner@example.com", stoppedAt: new Date().toISOString() },
     });
     const { body } = await get("/servers/family");
-    assert.match(body, /<span class="state offline">Stopped<\/span>/);
+    assert.match(body, /<span class="state bad">(<svg[^>]*>.*?<\/svg>)?Stopped<\/span>/);
     assert.match(body, /Stopped by<\/dt><dd>owner@example.com, \d+ s ago/);
     assert.match(body, /value="start"/);
     assert.doesNotMatch(body, /value="save"|action=restart|action=stop/);
@@ -198,7 +200,9 @@ describe("admin menu pages", () => {
     const { body } = await get("/servers/family/confirm?action=restart");
     assert.match(body, /<strong>2 players are online<\/strong> \(KidOne, KidTwo\)/);
     assert.match(body, /warned in chat at 60, 30 and 10 seconds/);
-    assert.match(body, /value="restart" \/><button type="submit" class="danger">Restart now<\/button>/);
+    assert.match(body, /value="restart" \/><button class="btn btn-danger" type="submit">Restart now<\/button>/);
+    // Breadcrumbs carry the depth: Status / Servers / Family / Restart.
+    assert.match(body, /class="crumbs"[\s\S]*Servers[\s\S]*Family[\s\S]*Restart/);
   });
 
   test("confirming a stop says it stays stopped", async () => {
@@ -237,7 +241,7 @@ describe("admin menu actions", () => {
     assert.deepEqual(await readdir(join(inbox, "tmp")), []);
 
     const progress = await get(`/actions/${id}`);
-    assert.match(progress.body, /<span class="state warning">Queued<\/span>/);
+    assert.match(progress.body, /<span class="state warn">(<svg[^>]*>.*?<\/svg>)?Queued<\/span>/);
     assert.match(progress.body, /http-equiv="refresh" content="3"/);
   });
 
@@ -265,12 +269,14 @@ describe("admin menu actions", () => {
     assert.match((await get("/servers/family")).body, new RegExp(`Another action is in progress: <a href="/actions/${id}">`));
     const running = await get(`/actions/${id}`);
     assert.match(running.body, /<h1>Restart: Crossplay<\/h1>/);
-    assert.match(running.body, /<span class="state warning">In progress<\/span>/);
-    assert.match(running.body, /Step<\/dt><dd>Waiting for healthy/);
+    assert.match(running.body, /<span class="state warn">(<svg[^>]*>.*?<\/svg>)?In progress<\/span>/);
+    // The steps of a restart, with the current one marked and the rest still queued.
+    assert.match(running.body, /<ol class="steps">[\s\S]*Warning players[\s\S]*Done[\s\S]*Waiting for healthy[\s\S]*In progress/);
+    assert.match(running.body, /40s so far; health: starting/);
 
     await writeFile(resultFile, JSON.stringify({ ...result, status: "done", step: "healthy", detail: "", updatedAt: new Date().toISOString() }));
     const done = await get(`/actions/${id}`);
-    assert.match(done.body, /<span class="state online">Done<\/span>/);
+    assert.match(done.body, /<span class="state ok">(<svg[^>]*>.*?<\/svg>)?Done<\/span>/);
     assert.doesNotMatch(done.body, /http-equiv="refresh"/);
     assert.equal((await post("/servers/family/actions", "action=save")).status, 303);
   });
@@ -282,7 +288,7 @@ describe("admin menu actions", () => {
       JSON.stringify({ id, server: "family", action: "start", status: "failed", step: "waiting for healthy", detail: "<b>crash</b>", updatedAt: new Date().toISOString() }),
     );
     const { body } = await get(`/actions/${id}`);
-    assert.match(body, /<span class="state offline">Failed<\/span>/);
+    assert.match(body, /<span class="state bad">(<svg[^>]*>.*?<\/svg>)?Failed<\/span>/);
     assert.match(body, /<pre class="log">&lt;b&gt;crash&lt;\/b&gt;<\/pre>/);
   });
 

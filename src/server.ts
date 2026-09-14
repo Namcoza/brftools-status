@@ -38,6 +38,7 @@ const server = createApp(config, pool, {
           minecraft: minecraft.statuses,
           inboxDir: admin.inboxDir,
           stateDir: admin.stateDir,
+          nav: config.nav,
         }),
       }
     : undefined,

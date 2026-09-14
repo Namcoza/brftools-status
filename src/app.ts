@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { Config } from "./config.ts";
+import type { Config, NavConfig } from "./config.ts";
 import { isDatabaseReachable, listReleases, type Pool, type Release } from "./db.ts";
-import { ago, detailList, escapeHtml, page } from "./html.ts";
+import { ago, detailList, escapeHtml, FAVICON_SVG, page, statusPill, type NavLinks, type Tone } from "./html.ts";
 import type { ServerStatus } from "./minecraft.ts";
 import type { TailscaleView } from "./tailscale.ts";
 
@@ -24,6 +24,11 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
     try {
       if (sources.admin && hostOf(req) === sources.admin.hostname) {
         return await sources.admin.handle(req, res);
+      }
+
+      if (req.method === "GET" && url.pathname === "/favicon.svg") {
+        res.writeHead(200, { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" });
+        return res.end(FAVICON_SVG);
       }
 
       // Healthy only when the database answers: the deploy script rolls back otherwise.
@@ -52,6 +57,7 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
             minecraft: sources.minecraft?.() ?? [],
             tailscale: tailscale ?? null,
             adminUrl: sources.admin ? `https://${sources.admin.hostname}` : "",
+            nav: config.nav,
           }),
         );
       }
@@ -68,62 +74,76 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
 export interface PageSections {
   minecraft?: ServerStatus[];
   tailscale?: TailscaleView | null;
-  // When set, each Minecraft card links to its page in the admin menu.
+  // When set, each Minecraft card is a link to its page in the admin menu.
   adminUrl?: string;
+  nav?: NavConfig;
   now?: Date;
 }
 
 export function renderPage(
   currentVersion: string,
   releases: Release[],
-  { minecraft = [], tailscale = null, adminUrl = "", now = new Date() }: PageSections = {},
+  { minecraft = [], tailscale = null, adminUrl = "", nav, now = new Date() }: PageSections = {},
 ): string {
   const rows = releases
     .map((release) => {
       const current = release.version === currentVersion ? ' class="current"' : "";
-      return `<tr${current}><td>${escapeHtml(release.startedAt.toISOString())}</td><td>${versionHtml(release.version)}</td></tr>`;
+      return `<tr${current}><td>${escapeHtml(release.startedAt.toISOString().slice(0, 16).replace("T", " "))}</td><td>${versionHtml(release.version)}</td></tr>`;
     })
-    .join("\n        ");
+    .join("\n          ");
 
   const table = releases.length
-    ? `<table>
-      <thead><tr><th>Started (UTC)</th><th>Version</th></tr></thead>
-      <tbody>
-        ${rows}
-      </tbody>
-    </table>`
+    ? `<table class="table">
+        <thead><tr><th>Started (UTC)</th><th>Version</th></tr></thead>
+        <tbody>
+          ${rows}
+        </tbody>
+      </table>`
     : "<p>No releases recorded yet.</p>";
 
   const minecraftSection = minecraft.length
     ? `<h2>Minecraft</h2>
-    <div class="servers">
-      ${minecraft.map((status) => serverCard(status, now, adminUrl)).join("\n      ")}
-    </div>`
+      <div class="cards">
+        ${minecraft.map((status) => serverCard(status, now, adminUrl)).join("\n        ")}
+      </div>`
     : "";
 
   const tailscaleSection = tailscale
-    ? `<h2>Tailscale</h2>
-    <div class="servers">
-      ${tailscaleCard(tailscale, now)}
-    </div>`
+    ? `<h2>Remote access</h2>
+      <div class="cards">
+        ${tailscaleCard(tailscale, now)}
+      </div>`
     : "";
 
   const body = `<h1>brftools status</h1>
-    ${minecraftSection}
-    ${tailscaleSection}
-    <h2>Release history</h2>
-    <p>Running version ${versionHtml(currentVersion)}. Each row is one start of the app; rollbacks appear as an older version starting again.</p>
-    ${table}`;
-  return page({ title: "brftools status", body, refreshSeconds: 60 });
+      <p class="meta">Refreshed every 60 seconds.</p>
+      ${minecraftSection}
+      ${tailscaleSection}
+      <h2>Release history</h2>
+      <p>Running version ${versionHtml(currentVersion)}. Each row is one start of the app; a rollback appears as an older version starting again.</p>
+      ${table}`;
+
+  return page({
+    title: "brftools status",
+    body,
+    refreshSeconds: 60,
+    nav: navLinks(nav),
+    faviconUrl: "/favicon.svg",
+  });
+}
+
+function navLinks(nav?: NavConfig): NavLinks {
+  return { status: nav?.statusUrl || "/", games: nav?.gamesUrl ?? "", map: nav?.mapUrl ?? "" };
 }
 
 // Player counts only: names are deliberately never shown on this public page.
 function serverCard({ server, state, checkedAt, result }: ServerStatus, now: Date, adminUrl: string): string {
   const title = (state === "online" && result?.motd) || server.name;
+  const tone: Tone = state === "online" ? "ok" : state === "offline" ? "bad" : "idle";
   const label = { unknown: "Checking…", online: "Online", offline: "Offline" }[state];
   const heading =
     adminUrl && server.id
-      ? `<a class="card-link" href="${escapeHtml(`${adminUrl}/servers/${server.id}`)}">${escapeHtml(title)}</a>`
+      ? `<a class="cover" href="${escapeHtml(`${adminUrl}/servers/${server.id}`)}">${escapeHtml(title)}</a>`
       : escapeHtml(title);
 
   const details: [string, string][] = [];
@@ -136,12 +156,11 @@ function serverCard({ server, state, checkedAt, result }: ServerStatus, now: Dat
 
   const checked = checkedAt ? `Checked ${ago(checkedAt, now)} ago` : "Not checked yet";
 
-  return `<section class="server">
-        <h3>${heading}</h3>
-        <span class="state ${state}">${label}</span>
-        ${detailList(details)}
-        <p class="checked">${checked}</p>
-      </section>`;
+  return `<section class="card">
+          <div class="card-head"><h3>${heading}</h3>${statusPill(tone, label)}</div>
+          ${detailList(details)}
+          <p class="meta">${checked}</p>
+        </section>`;
 }
 
 const BACKEND_STATES: Record<string, string> = {
@@ -168,39 +187,45 @@ function tailscaleCard({ state, snapshot }: TailscaleView, now: Date): string {
             : backendState === "Running"
               ? "Not connected to Tailscale"
               : (BACKEND_STATES[backendState] ?? (backendState || "Down"));
-  const tone = state === "connected" ? "online" : state === "degraded" || state === "stale" ? "warning" : "offline";
+  const tone: Tone = state === "connected" ? "ok" : state === "degraded" || state === "stale" ? "warn" : "bad";
 
   const details: [string, string][] = [];
   if (snapshot?.relay) details.push(["Relay", escapeHtml(snapshot.relay.toUpperCase())]);
   for (const warning of snapshot?.health ?? []) details.push(["Warning", escapeHtml(warning)]);
   if (snapshot?.error) details.push(["Error", escapeHtml(snapshot.error)]);
 
-  const devices = snapshot?.peers.length
-    ? `<ul class="devices">${snapshot.peers
-        .map((peer) => {
-          const presence = peer.online
-            ? "online"
-            : `offline${peer.lastSeen ? `, last seen ${ago(peer.lastSeen, now)} ago` : ""}`;
-          const about = [peer.os, presence].filter(Boolean).map(escapeHtml).join(" · ");
-          return `<li>${escapeHtml(peer.name)} <span>${about}</span></li>`;
-        })
-        .join("")}</ul>`
+  // Folded to a count by default, so a phone shows the state first.
+  const peers = snapshot?.peers ?? [];
+  const online = peers.filter((peer) => peer.online).length;
+  const devices = peers.length
+    ? `<details class="above">
+            <summary>${peers.length} ${peers.length === 1 ? "device" : "devices"} · ${online} online</summary>
+            <ul class="devices">${peers
+              .map((peer) => {
+                const presence = peer.online
+                  ? "online"
+                  : `offline${peer.lastSeen ? `, last seen ${ago(peer.lastSeen, now)} ago` : ""}`;
+                const about = [peer.os, presence].filter(Boolean).map(escapeHtml).join(" · ");
+                return `<li><span>${escapeHtml(peer.name)}</span><span class="who">${about}</span></li>`;
+              })
+              .join("")}</ul>
+          </details>`
     : "";
 
   const updated = snapshot ? `Updated ${ago(snapshot.generatedAt, now)} ago` : "Status file missing or unreadable";
 
-  return `<section class="server">
-        <h3>This server</h3>
-        <span class="state ${tone}">${label}</span>
-        ${detailList(details)}
-        ${devices}
-        <p class="checked">${updated}</p>
-      </section>`;
+  return `<section class="card">
+          <div class="card-head"><h3>This server</h3>${statusPill(tone, label)}</div>
+          ${detailList(details)}
+          ${devices}
+          <p class="meta">${updated}</p>
+        </section>`;
 }
 
 // A full commit SHA links to that commit; anything else (such as "dev") is plain text.
 function versionHtml(version: string): string {
-  const code = `<code>${escapeHtml(version)}</code>`;
+  const shortened = /^[0-9a-f]{40}$/.test(version) ? version.slice(0, 7) : version;
+  const code = `<code>${escapeHtml(shortened)}</code>`;
   return /^[0-9a-f]{40}$/.test(version) ? `<a href="${COMMIT_URL}${version}">${code}</a>` : code;
 }
 

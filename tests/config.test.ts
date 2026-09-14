@@ -121,6 +121,16 @@ test("a partial or invalid admin configuration fails at startup", () => {
   );
 });
 
+test("header and footer links are optional, and must be http or https", () => {
+  assert.deepEqual(loadConfig(required).nav, { statusUrl: "", gamesUrl: "", mapUrl: "" });
+  assert.deepEqual(
+    loadConfig({ ...required, PUBLIC_STATUS_URL: "https://status.example/", PUBLIC_GAMES_URL: "https://games.example/" }).nav,
+    { statusUrl: "https://status.example/", gamesUrl: "https://games.example/", mapUrl: "" },
+  );
+  assert.throws(() => loadConfig({ ...required, PUBLIC_MAP_URL: "javascript:alert(1)" }), /PUBLIC_MAP_URL must be an http or https URL/);
+  assert.throws(() => loadConfig({ ...required, PUBLIC_STATUS_URL: "status.example" }), /PUBLIC_STATUS_URL must be an http or https URL/);
+});
+
 test("DATABASE_URL is required and never echoed", () => {
   assert.throws(() => loadConfig({}), /^Error: DATABASE_URL must be set$/);
   assert.throws(() => loadConfig({ DATABASE_URL: "" }), /DATABASE_URL must be set/);
