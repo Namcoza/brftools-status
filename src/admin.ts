@@ -1,0 +1,508 @@
+import { randomBytes } from "node:crypto";
+import { readdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { join } from "node:path";
+import { AccessError, type AccessVerifier } from "./access.ts";
+import { ago, detailList, escapeHtml, page } from "./html.ts";
+import type { MinecraftServerConfig, ServerStatus } from "./minecraft.ts";
+
+// The private Minecraft admin menu, served only on the admin hostname and only to requests that
+// carry a valid Cloudflare Access token. It never touches Minecraft or Docker itself: an action is
+// a small request file dropped in the inbox for the host's root-owned runner, which checks it
+// against an allow-list, does the work, and writes progress to the state directory (mounted
+// read-only here). See README, "Admin menu".
+
+export const ACTIONS = {
+  save: { label: "Save world", disruptive: false, whenRunning: true },
+  restart: { label: "Restart", disruptive: true, whenRunning: true },
+  stop: { label: "Stop", disruptive: true, whenRunning: true },
+  start: { label: "Start", disruptive: false, whenRunning: false },
+} as const;
+
+export type Action = keyof typeof ACTIONS;
+
+const REQUEST_ID = /^[0-9a-f]{32}$/;
+const REQUEST_FILE = /^[0-9a-f]{32}\.json$/;
+// The runner gives up on a request after 45 minutes, so an older "running" result is abandoned.
+const RUNNING_STALE_MS = 45 * 60_000;
+// The host writes server state every 30 seconds.
+const SNAPSHOT_STALE_MS = 2 * 60_000;
+
+type Tone = "online" | "warning" | "offline";
+
+export interface ServerSnapshot {
+  generatedAt: Date | null;
+  exists: boolean;
+  running: boolean;
+  status: string;
+  health: string;
+  startedAt: Date | null;
+  stoppedBy: string;
+  stoppedAt: Date | null;
+  log: string[];
+}
+
+export interface ActionResult {
+  id: string;
+  server: string;
+  action: string;
+  requestedBy: string;
+  status: string;
+  step: string;
+  detail: string;
+  updatedAt: Date | null;
+}
+
+export interface HistoryEntry {
+  id: string;
+  server: string;
+  action: string;
+  requestedBy: string;
+  status: string;
+  step: string;
+  finishedAt: Date | null;
+}
+
+export function parseSnapshot(json: string): ServerSnapshot {
+  const raw = record(JSON.parse(json));
+  const stopped = record(raw.stopped);
+  return {
+    generatedAt: date(raw.generatedAt),
+    exists: raw.exists === true,
+    running: raw.running === true,
+    status: text(raw.status),
+    health: text(raw.health),
+    startedAt: date(raw.startedAt),
+    stoppedBy: text(stopped.stoppedBy),
+    stoppedAt: date(stopped.stoppedAt),
+    log: Array.isArray(raw.log) ? raw.log.filter((line): line is string => typeof line === "string") : [],
+  };
+}
+
+export function parseResult(json: string): ActionResult {
+  const raw = record(JSON.parse(json));
+  return {
+    id: text(raw.id),
+    server: text(raw.server),
+    action: text(raw.action),
+    requestedBy: text(raw.requestedBy),
+    status: text(raw.status),
+    step: text(raw.step),
+    detail: text(raw.detail),
+    updatedAt: date(raw.updatedAt),
+  };
+}
+
+// Newest first; lines that are not valid JSON are skipped.
+export function parseHistory(jsonl: string): HistoryEntry[] {
+  const entries: HistoryEntry[] = [];
+  for (const line of jsonl.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const raw = record(JSON.parse(line));
+      entries.push({
+        id: text(raw.id),
+        server: text(raw.server),
+        action: text(raw.action),
+        requestedBy: text(raw.requestedBy),
+        status: text(raw.status),
+        step: text(raw.step),
+        finishedAt: date(raw.finishedAt),
+      });
+    } catch {
+      // Skip the line.
+    }
+  }
+  return entries.reverse();
+}
+
+export interface AdminOptions {
+  hostname: string;
+  verifier: AccessVerifier;
+  servers: MinecraftServerConfig[];
+  minecraft: () => ServerStatus[];
+  inboxDir: string;
+  stateDir: string;
+  now?: () => Date;
+}
+
+export function createAdminHandler(options: AdminOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  const { hostname, verifier, servers, inboxDir, stateDir } = options;
+  const now = options.now ?? (() => new Date());
+  const origin = `https://${hostname}`;
+
+  const snapshotOf = (id: string) => readParsed(join(stateDir, "servers", `${id}.json`), parseSnapshot);
+  const resultOf = (requestId: string) => readParsed(join(stateDir, "results", `${requestId}.json`), parseResult);
+  const statusOf = (id: string) => options.minecraft().find((status) => status.server.id === id);
+  const history = async () => (await readParsed(join(stateDir, "history.jsonl"), parseHistory)) ?? [];
+
+  // An action is in progress while a request waits in the inbox or a recent result is still running.
+  async function inProgress(): Promise<string | null> {
+    const queued = (await list(join(inboxDir, "new"))).find((name) => REQUEST_FILE.test(name));
+    if (queued) return queued.slice(0, 32);
+    const resultsDir = join(stateDir, "results");
+    for (const name of await list(resultsDir)) {
+      if (!REQUEST_FILE.test(name)) continue;
+      const path = join(resultsDir, name);
+      try {
+        if (now().getTime() - (await stat(path)).mtimeMs > RUNNING_STALE_MS) continue;
+      } catch {
+        continue;
+      }
+      if ((await readParsed(path, parseResult))?.status === "running") return name.slice(0, 32);
+    }
+    return null;
+  }
+
+  // Written under tmp/ and renamed into new/, so the runner never sees a half-written request.
+  async function submit(server: MinecraftServerConfig, action: Action, email: string): Promise<string> {
+    const id = randomBytes(16).toString("hex");
+    const request = { id, server: server.id, action, requestedBy: email, requestedAt: now().toISOString() };
+    const tmp = join(inboxDir, "tmp", `${id}.json`);
+    await writeFile(tmp, JSON.stringify(request), { mode: 0o600 });
+    await rename(tmp, join(inboxDir, "new", `${id}.json`));
+    return id;
+  }
+
+  // Form posts must come from the admin menu itself, not from another site the browser is on.
+  function sameOrigin(req: IncomingMessage): boolean {
+    const site = header(req, "sec-fetch-site");
+    if (site) return site === "same-origin";
+    return header(req, "origin") === origin;
+  }
+
+  async function overviewPage(email: string): Promise<string> {
+    const [entries, current] = await Promise.all([history(), inProgress()]);
+    const t = now();
+    const cards = await Promise.all(
+      servers.map(async (server) => {
+        const snapshot = await snapshotOf(server.id);
+        const state = stateOf(snapshot);
+        const details: [string, string][] = [["Players", playersHtml(statusOf(server.id))]];
+        if (snapshot && !snapshot.running && snapshot.stoppedBy) details.push(["Stopped by", stoppedHtml(snapshot, t)]);
+        const last = entries.find((entry) => entry.server === server.id);
+        if (last) {
+          const when = last.finishedAt ? `, ${ago(last.finishedAt, t)} ago` : "";
+          details.push(["Last action", `${escapeHtml(`${actionLabel(last.action)}: ${outcome(last.status, last.step)}`)}${when}`]);
+        }
+        return `<section class="server">
+        <h3><a class="card-link" href="/servers/${escapeHtml(server.id)}">${escapeHtml(server.name)}</a></h3>
+        <span class="state ${state.tone}">${state.label}</span>
+        ${detailList(details)}
+      </section>`;
+      }),
+    );
+    const body = `<h1>Minecraft admin</h1>
+    <p class="note">Signed in as ${escapeHtml(email)}.</p>
+    ${current ? `<p>An action is in progress: <a href="/actions/${current}">view its progress</a>.</p>` : ""}
+    <div class="servers">
+      ${cards.join("\n      ")}
+    </div>`;
+    return page({ title: "Minecraft admin", body, refreshSeconds: 30 });
+  }
+
+  async function serverPage(server: MinecraftServerConfig, email: string): Promise<string> {
+    const [snapshot, entries, current] = await Promise.all([snapshotOf(server.id), history(), inProgress()]);
+    const status = statusOf(server.id);
+    const state = stateOf(snapshot);
+    const t = now();
+    const id = escapeHtml(server.id);
+
+    const details: [string, string][] = [["Players", playersHtml(status)]];
+    if (status?.state === "online" && status.result?.version) details.push(["Version", escapeHtml(status.result.version)]);
+    if (snapshot?.running && snapshot.startedAt) details.push(["Up for", ago(snapshot.startedAt, t)]);
+    if (snapshot && !snapshot.running && snapshot.stoppedBy) details.push(["Stopped by", stoppedHtml(snapshot, t)]);
+
+    let actions: string;
+    if (current) {
+      actions = `<p>Another action is in progress: <a href="/actions/${current}">view its progress</a>.</p>`;
+    } else if (!snapshot?.exists) {
+      actions = `<p class="note">Actions are unavailable until the host reports this server's state.</p>`;
+    } else {
+      const available = (Object.keys(ACTIONS) as Action[]).filter((action) => ACTIONS[action].whenRunning === snapshot.running);
+      actions = `<div class="actions">${available
+        .map((action) =>
+          ACTIONS[action].disruptive
+            ? `<a class="button danger" href="/servers/${id}/confirm?action=${action}">${ACTIONS[action].label}…</a>`
+            : actionForm(server, action, ACTIONS[action].label, false),
+        )
+        .join("")}</div>`;
+    }
+
+    const rows = entries
+      .filter((entry) => entry.server === server.id)
+      .slice(0, 10)
+      .map(
+        (entry) =>
+          `<tr><td>${entry.finishedAt ? `${ago(entry.finishedAt, t)} ago` : ""}</td><td>${escapeHtml(actionLabel(entry.action))}</td><td>${escapeHtml(outcome(entry.status, entry.step))}</td><td>${escapeHtml(entry.requestedBy)}</td></tr>`,
+      );
+    const table = rows.length
+      ? `<table><thead><tr><th>When</th><th>Action</th><th>Result</th><th>By</th></tr></thead><tbody>${rows.join("")}</tbody></table>`
+      : `<p class="note">No actions yet.</p>`;
+
+    const stale =
+      snapshot?.generatedAt && t.getTime() - snapshot.generatedAt.getTime() > SNAPSHOT_STALE_MS
+        ? `<p class="note">Server state last updated ${ago(snapshot.generatedAt, t)} ago; the host snapshot may have stopped.</p>`
+        : "";
+    const log = snapshot?.log.length
+      ? `<pre class="log">${escapeHtml(snapshot.log.join("\n"))}</pre>`
+      : `<p class="note">No log available.</p>`;
+
+    const body = `<p><a href="/">← All servers</a></p>
+    <h1>${escapeHtml(server.name)}</h1>
+    <span class="state ${state.tone}">${state.label}</span>
+    ${detailList(details)}
+    ${stale}
+    <h2>Actions</h2>
+    ${actions}
+    <h2>Recent actions</h2>
+    ${table}
+    <h2>Recent log</h2>
+    <p class="note">Last 50 lines, with IP addresses removed.</p>
+    ${log}
+    <p class="note">Signed in as ${escapeHtml(email)}.</p>`;
+    return page({ title: `${server.name} · Minecraft admin`, body, refreshSeconds: 30 });
+  }
+
+  function confirmPage(server: MinecraftServerConfig, action: Action): string {
+    const { label, disruptive } = ACTIONS[action];
+    const status = statusOf(server.id);
+    const online = status?.state === "online" && status.result ? status.result.playersOnline : 0;
+    const names = status?.result?.playerNames ?? [];
+    const who =
+      online > 0
+        ? `<p><strong>${online} ${online === 1 ? "player is" : "players are"} online</strong>${names.length ? ` (${names.map(escapeHtml).join(", ")})` : ""}. They are warned in chat at 60, 30 and 10 seconds first.</p>`
+        : `<p>Nobody is online, so this happens straight away.</p>`;
+    const what: Record<Action, string> = {
+      save: "The world is saved. Nobody is disconnected.",
+      restart: "The world is saved and the server restarts. It is usually back within two minutes.",
+      stop: "The world is saved and the server stops. <strong>It stays stopped, even if the host reboots, until someone presses Start.</strong>",
+      start: "The server starts. It is usually ready within two minutes.",
+    };
+    const id = escapeHtml(server.id);
+    const body = `<p><a href="/servers/${id}">← ${escapeHtml(server.name)}</a></p>
+    <h1>${label} ${escapeHtml(server.name)}?</h1>
+    ${disruptive ? who : ""}
+    <p>${what[action]}</p>
+    ${disruptive ? `<p class="note">Player counts can be up to 30 seconds old; the host checks again before acting.</p>` : ""}
+    <div class="actions">
+      ${actionForm(server, action, `${label} now`, disruptive)}
+      <a class="button" href="/servers/${id}">Cancel</a>
+    </div>`;
+    return page({ title: `${label} ${server.name}? · Minecraft admin`, body });
+  }
+
+  async function progressPage(requestId: string): Promise<string> {
+    const [result, queued] = await Promise.all([resultOf(requestId), exists(join(inboxDir, "new", `${requestId}.json`))]);
+    const server = servers.find((candidate) => candidate.id === result?.server);
+    const t = now();
+
+    const finished = result !== null && result.status in FINISHED;
+    const { label, tone } = !result
+      ? { label: queued ? "Queued" : "Waiting for the host", tone: "warning" as Tone }
+      : (FINISHED[result.status] ?? { label: "In progress", tone: "warning" as Tone });
+
+    const details: [string, string][] = [];
+    if (result?.step) details.push(["Step", escapeHtml(capitalise(result.step))]);
+    if (result?.detail && result.status !== "failed") details.push(["Detail", escapeHtml(result.detail)]);
+    if (result?.requestedBy) details.push(["Requested by", escapeHtml(result.requestedBy)]);
+    if (result?.updatedAt) details.push(["Updated", `${ago(result.updatedAt, t)} ago`]);
+    const failure =
+      result?.status === "failed" && result.detail ? `<h2>Recent log</h2><pre class="log">${escapeHtml(result.detail)}</pre>` : "";
+
+    const title = result ? `${actionLabel(result.action)}: ${server?.name ?? result.server}` : "Action";
+    const back = server
+      ? `<a href="/servers/${escapeHtml(server.id)}">← ${escapeHtml(server.name)}</a>`
+      : `<a href="/">← All servers</a>`;
+    const body = `<p>${back}</p>
+    <h1>${escapeHtml(title)}</h1>
+    <span class="state ${tone}">${label}</span>
+    ${detailList(details)}
+    ${finished ? "" : `<p class="note">This page refreshes every 3 seconds.</p>`}
+    ${failure}`;
+    return page({ title: `${title} · Minecraft admin`, body, refreshSeconds: finished ? undefined : 3 });
+  }
+
+  async function postAction(req: IncomingMessage, res: ServerResponse, server: MinecraftServerConfig, email: string) {
+    const back = `<a href="/servers/${escapeHtml(server.id)}">Back to ${escapeHtml(server.name)}</a>`;
+    if (!sameOrigin(req)) {
+      console.error(`admin: refused cross-site POST for ${server.id} (${JSON.stringify(email)})`);
+      return sendHtml(res, 403, messagePage("Refused", "The request did not come from the admin menu itself."));
+    }
+    const body = await readBody(req, 1024);
+    if (body === null) return sendHtml(res, 413, messagePage("Too large", back));
+    const action = actionFrom(new URLSearchParams(body).get("action"));
+    if (!action) return sendHtml(res, 400, messagePage("Unknown action", back));
+
+    const snapshot = await snapshotOf(server.id);
+    if (!snapshot?.exists) {
+      return sendHtml(res, 409, messagePage("Not possible right now", `The host has not reported this server's state. ${back}`));
+    }
+    if (ACTIONS[action].whenRunning !== snapshot.running) {
+      const why = snapshot.running ? "is already running" : "is not running";
+      return sendHtml(res, 409, messagePage("Not possible right now", `${escapeHtml(server.name)} ${why}. ${back}`));
+    }
+    const current = await inProgress();
+    if (current) {
+      return sendHtml(res, 409, messagePage("Another action is in progress", `<a href="/actions/${current}">View its progress</a>`));
+    }
+
+    const requestId = await submit(server, action, email);
+    console.log(`admin: ${JSON.stringify(email)} requested ${action} on ${server.id} (${requestId})`);
+    res.writeHead(303, { location: `/actions/${requestId}`, "cache-control": "no-store" });
+    res.end();
+  }
+
+  return async (req, res) => {
+    let email: string;
+    try {
+      email = (await verifier.verify(header(req, "cf-access-jwt-assertion"))).email;
+    } catch (error) {
+      const reason = error instanceof AccessError ? error.message : `verification failed: ${(error as Error).message}`;
+      console.error(`admin: refused ${req.method} ${JSON.stringify(req.url)}: ${reason}`);
+      return sendHtml(res, 403, messagePage("Forbidden", "Sign in through Cloudflare Access to use the admin menu."));
+    }
+
+    const url = new URL(req.url ?? "/", origin);
+    const [section, name, sub, ...rest] = url.pathname.split("/").filter(Boolean);
+    const server = section === "servers" ? servers.find((candidate) => candidate.id === name) : undefined;
+
+    if (rest.length === 0) {
+      if (req.method === "GET" && section === undefined) return sendHtml(res, 200, await overviewPage(email));
+      if (req.method === "GET" && server && sub === undefined) return sendHtml(res, 200, await serverPage(server, email));
+      if (req.method === "GET" && server && sub === "confirm") {
+        const action = actionFrom(url.searchParams.get("action"));
+        if (action) return sendHtml(res, 200, confirmPage(server, action));
+      }
+      if (req.method === "POST" && server && sub === "actions") return postAction(req, res, server, email);
+      if (req.method === "GET" && section === "actions" && name && REQUEST_ID.test(name) && sub === undefined) {
+        return sendHtml(res, 200, await progressPage(name));
+      }
+    }
+    return sendHtml(res, 404, messagePage("Not found", `<a href="/">Back to the admin menu</a>`));
+  };
+}
+
+const FINISHED: Record<string, { label: string; tone: Tone }> = {
+  done: { label: "Done", tone: "online" },
+  failed: { label: "Failed", tone: "offline" },
+  rejected: { label: "Refused", tone: "offline" },
+};
+
+const OUTCOMES: Record<string, string> = { done: "Done", failed: "Failed", rejected: "Refused", running: "In progress" };
+
+function stateOf(snapshot: ServerSnapshot | null): { label: string; tone: Tone } {
+  if (!snapshot) return { label: "No data from the host", tone: "offline" };
+  if (!snapshot.exists) return { label: "Container missing", tone: "offline" };
+  if (!snapshot.running) return { label: "Stopped", tone: "offline" };
+  if (snapshot.health === "starting") return { label: "Starting", tone: "warning" };
+  if (snapshot.health === "unhealthy") return { label: "Running, unhealthy", tone: "offline" };
+  return { label: "Running", tone: "online" };
+}
+
+function playersHtml(status: ServerStatus | undefined): string {
+  if (!status || status.state === "unknown") return "Checking…";
+  if (status.state !== "online" || !status.result) return "Not reachable";
+  const { playersOnline, playersMax, playerNames } = status.result;
+  const count = `${playersOnline} / ${playersMax}`;
+  if (playersOnline === 0 || playerNames.length === 0) return count;
+  const more = playersOnline - playerNames.length;
+  return `${count} — ${playerNames.map(escapeHtml).join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
+}
+
+function stoppedHtml(snapshot: ServerSnapshot, now: Date): string {
+  return `${escapeHtml(snapshot.stoppedBy)}${snapshot.stoppedAt ? `, ${ago(snapshot.stoppedAt, now)} ago` : ""}`;
+}
+
+function actionForm(server: MinecraftServerConfig, action: Action, text: string, danger: boolean): string {
+  return `<form method="post" action="/servers/${escapeHtml(server.id)}/actions"><input type="hidden" name="action" value="${action}" /><button type="submit"${danger ? ' class="danger"' : ""}>${escapeHtml(text)}</button></form>`;
+}
+
+function actionFrom(value: string | null): Action | null {
+  return value !== null && Object.hasOwn(ACTIONS, value) ? (value as Action) : null;
+}
+
+function actionLabel(action: string): string {
+  const known = actionFrom(action);
+  return known ? ACTIONS[known].label : action || "Unknown";
+}
+
+function outcome(status: string, step: string): string {
+  const label = OUTCOMES[status] ?? status;
+  return step ? `${label} (${step})` : label;
+}
+
+function capitalise(value: string): string {
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function messagePage(title: string, html: string): string {
+  return page({ title, body: `<h1>${escapeHtml(title)}</h1>\n    <p>${html}</p>` });
+}
+
+function sendHtml(res: ServerResponse, status: number, html: string): void {
+  res.writeHead(status, {
+    "content-type": "text/html; charset=utf-8",
+    "cache-control": "no-store",
+    // No scripts, no framing (so the buttons cannot be clickjacked), forms only to this origin.
+    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+    "referrer-policy": "same-origin",
+  });
+  res.end(html);
+}
+
+function header(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+async function readBody(req: IncomingMessage, limit: number): Promise<string | null> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length;
+    if (size > limit) return null;
+    chunks.push(chunk as Buffer);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function readParsed<T>(path: string, parse: (text: string) => T): Promise<T | null> {
+  try {
+    return parse(await readFile(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+async function list(dir: string): Promise<string[]> {
+  try {
+    return await readdir(dir);
+  } catch {
+    return [];
+  }
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function record(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+// Docker reports "0001-01-01T00:00:00Z" for times that never happened.
+function date(value: unknown): Date | null {
+  if (typeof value !== "string") return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) || parsed.getUTCFullYear() < 2000 ? null : parsed;
+}

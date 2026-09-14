@@ -1,6 +1,6 @@
 # brftools-status
 
-Status page for the brftools P410 deploy pilot. Each time a version of the app starts, it records the version and start time in PostgreSQL and lists them on its home page. Above that, it shows whether each configured Minecraft server is up and how many players are online. See [`PRODUCT.md`](PRODUCT.md) for purpose and acceptance criteria.
+Status page for the brftools P410 deploy pilot. Each time a version of the app starts, it records the version and start time in PostgreSQL and lists them on its home page. Above that, it shows whether each configured Minecraft server is up and how many players are online, and the host's Tailscale connection. A private admin menu on a separate hostname lets the owner save, restart, stop and start the Minecraft servers. See [`PRODUCT.md`](PRODUCT.md) for purpose and acceptance criteria.
 
 **branch = work · pull request = validation · main = live**
 
@@ -46,7 +46,8 @@ TCP only (`unix_socket_directories=`) avoids macOS's 103-byte limit on socket pa
 AGENTS.md            rules for AI-assisted changes (CLAUDE.md points here)
 PRODUCT.md           purpose, users and acceptance criteria
 docs/                intake checklist, deployment profiles, decisions
-src/                 config.ts, db.ts (pool, migrations, queries), minecraft.ts (status ping), tailscale.ts (host summary), app.ts, server.ts
+src/                 config.ts, db.ts (pool, migrations, queries), minecraft.ts (status ping), tailscale.ts (host summary),
+                     access.ts (Access token check), admin.ts (admin menu), html.ts, app.ts, server.ts
 migrations/          numbered SQL migrations, applied in order at startup
 tests/               node:test tests
 Dockerfile           production image
@@ -68,10 +69,16 @@ compose.yml          production runtime declaration
 | `PORT` | Port the server listens on | `3000` |
 | `APP_VERSION` | Version recorded and reported; the image sets it to the commit SHA | `dev` |
 | `MC_n_PING` | Minecraft server `host:port` to ping, as reachable from the container. `n` is 1–4; a server is shown only when this is set | none |
+| `MC_n_ID` | Slug for that server in the admin menu and the host runner (lower-case letters, digits, hyphens). Required for every server when the admin menu is on | none |
 | `MC_n_NAME` | Name shown for that server when it is offline or not yet checked (its MOTD is shown when online) | required with `MC_n_PING` |
 | `MC_n_JOIN` | Free text shown as the address to join | none |
 | `MC_n_MAP_URL` | `http`/`https` link to that server's web map | none |
 | `TAILSCALE_STATUS_FILE` | Absolute path, inside the container, of the Tailscale summary written by the host. Unset hides the section | none |
+| `ADMIN_HOSTNAME` | Hostname the private admin menu is served on. The admin menu is on only when this and the next four are all set | none |
+| `ACCESS_TEAM_DOMAIN` | Cloudflare Access team domain, e.g. `<team>.cloudflareaccess.com`; its signing keys verify admin requests | none |
+| `ACCESS_AUD` | Audience tag of the Access application protecting `ADMIN_HOSTNAME` | none |
+| `MC_ACTIONS_INBOX_DIR` | Absolute path, inside the container, of the runner's inbox (writable) | none |
+| `MC_ACTIONS_STATE_DIR` | Absolute path, inside the container, of the runner's state (read-only) | none |
 
 Real values never go in the repository. In production, `.env` is rendered from 1Password at deploy time.
 
@@ -92,6 +99,24 @@ Shows whether the host is connected to its tailnet, for troubleshooting remote a
 | No data | File missing or unreadable |
 
 **Device names are shown on this public page** by the owner's decision. As with Minecraft, Tailscale state never affects `/healthz`. The host script and timer are not part of this repository.
+
+### Admin menu
+
+A private menu for the Minecraft servers: who is online by name, each server's state and recent log, recent actions, and buttons to **save**, **restart**, **stop** and **start**. Clicking a server card on the public page opens it.
+
+- **Private, and checked by the app.** Admin pages are served only for requests whose `Host` is `ADMIN_HOSTNAME`, which sits behind a Cloudflare Access application. The app also verifies the `Cf-Access-Jwt-Assertion` token on every admin request itself: the RS256 signature against `https://<ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs`, the audience `ACCESS_AUD`, the issuer and the expiry. Without a valid token, every admin route returns `403`, however the request arrived. The public hostname never serves admin routes.
+- **No Minecraft, Docker or RCON access in the app.** An action is a small JSON request (`id`, `server`, `action`, `requestedBy`, `requestedAt`) written to `MC_ACTIONS_INBOX_DIR/tmp/` and then renamed into `new/`. A root-owned runner on the host, not part of this repository, then:
+  - checks the request against an allow-list
+  - before a restart or stop, warns players in chat at 60, 30 and 10 seconds and saves the world
+  - does the action and writes its progress to `MC_ACTIONS_STATE_DIR/results/<id>.json`
+
+  The runner also writes each server's container state and recent log (with IP addresses removed) to `servers/<id>.json`, and an audit trail to `history.jsonl`. The state directory is mounted read-only.
+- **Actions:**
+  - *Save world* and *Start* run straight away.
+  - *Restart* and *Stop* go through a confirmation page that names who is online.
+  - One action runs at a time; the runner also rate-limits and re-checks the server's state.
+  - **Stop is sticky**: a stopped server stays stopped, even across host reboots, until someone presses Start.
+- **Browser protections:** form posts must be same-origin — `Sec-Fetch-Site: same-origin`, or a matching `Origin` when the browser sends no `Sec-Fetch-Site`. Admin pages send `no-store`, and a Content-Security-Policy that allows no scripts and no framing.
 
 ## Persistent data
 

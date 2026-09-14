@@ -1,15 +1,20 @@
-import { createServer, type Server, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Config } from "./config.ts";
 import { isDatabaseReachable, listReleases, type Pool, type Release } from "./db.ts";
+import { ago, detailList, escapeHtml, page } from "./html.ts";
 import type { ServerStatus } from "./minecraft.ts";
 import type { TailscaleView } from "./tailscale.ts";
 
 const COMMIT_URL = "https://github.com/Namcoza/brftools-status/commit/";
 
-// Optional status sources. Each page section is shown only when its source is configured.
+export type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
+
+// Optional parts. Each page section is shown only when its source is configured.
 export interface Sources {
   minecraft?: () => ServerStatus[];
   tailscale?: () => Promise<TailscaleView>;
+  // The private admin menu handles every request whose Host is its hostname, and nothing else.
+  admin?: { hostname: string; handle: Handler };
 }
 
 export function createApp(config: Config, pool: Pool, sources: Sources = {}): Server {
@@ -17,6 +22,10 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
     const url = new URL(req.url ?? "/", "http://localhost");
 
     try {
+      if (sources.admin && hostOf(req) === sources.admin.hostname) {
+        return await sources.admin.handle(req, res);
+      }
+
       // Healthy only when the database answers: the deploy script rolls back otherwise.
       // Minecraft and Tailscale state are reported for information and never change the
       // status code, so neither can roll this app back.
@@ -39,13 +48,18 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
         const [releases, tailscale] = await Promise.all([listReleases(pool), sources.tailscale?.()]);
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
         return res.end(
-          renderPage(config.appVersion, releases, { minecraft: sources.minecraft?.() ?? [], tailscale: tailscale ?? null }),
+          renderPage(config.appVersion, releases, {
+            minecraft: sources.minecraft?.() ?? [],
+            tailscale: tailscale ?? null,
+            adminUrl: sources.admin ? `https://${sources.admin.hostname}` : "",
+          }),
         );
       }
 
       return sendJson(res, 404, { error: "not found" });
     } catch (error) {
       console.error(error);
+      if (res.headersSent) return res.end();
       return sendJson(res, 500, { error: "internal error" });
     }
   });
@@ -54,13 +68,15 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
 export interface PageSections {
   minecraft?: ServerStatus[];
   tailscale?: TailscaleView | null;
+  // When set, each Minecraft card links to its page in the admin menu.
+  adminUrl?: string;
   now?: Date;
 }
 
 export function renderPage(
   currentVersion: string,
   releases: Release[],
-  { minecraft = [], tailscale = null, now = new Date() }: PageSections = {},
+  { minecraft = [], tailscale = null, adminUrl = "", now = new Date() }: PageSections = {},
 ): string {
   const rows = releases
     .map((release) => {
@@ -81,7 +97,7 @@ export function renderPage(
   const minecraftSection = minecraft.length
     ? `<h2>Minecraft</h2>
     <div class="servers">
-      ${minecraft.map((status) => serverCard(status, now)).join("\n      ")}
+      ${minecraft.map((status) => serverCard(status, now, adminUrl)).join("\n      ")}
     </div>`
     : "";
 
@@ -92,55 +108,23 @@ export function renderPage(
     </div>`
     : "";
 
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta http-equiv="refresh" content="60" />
-    <title>brftools status</title>
-    <style>
-      :root { color-scheme: light dark; }
-      body { font-family: system-ui, sans-serif; max-width: 44rem; margin: 0 auto; padding: 4rem 1.25rem; line-height: 1.5; }
-      h1 { margin: 0 0 0.25rem; }
-      h2 { margin: 2rem 0 0.25rem; font-size: 1.25rem; }
-      table { width: 100%; border-collapse: collapse; margin-top: 1.5rem; font-size: 0.9rem; }
-      th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
-      tr.current td { font-weight: 600; }
-      code { font-size: 0.85em; word-break: break-all; }
-      a { color: inherit; }
-      .servers { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); margin-top: 1rem; }
-      .server { border: 1px solid color-mix(in srgb, currentColor 15%, transparent); border-radius: 0.5rem; padding: 0.75rem 1rem; }
-      .server h3 { margin: 0; font-size: 1rem; }
-      .state { font-size: 0.85rem; font-weight: 600; }
-      .state.online::before, .state.warning::before, .state.offline::before { content: "● "; }
-      .state.online::before { color: #2e9e55; }
-      .state.warning::before { color: #d99a1e; }
-      .state.offline::before { color: #d9534f; }
-      .server dl { display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 0.75rem; margin: 0.5rem 0; font-size: 0.9rem; }
-      .server dt { opacity: 0.7; }
-      .server dd { margin: 0; overflow-wrap: anywhere; }
-      .devices { list-style: none; padding: 0; margin: 0.5rem 0; font-size: 0.9rem; }
-      .devices span { opacity: 0.7; }
-      .checked { margin: 0; font-size: 0.8rem; opacity: 0.7; }
-    </style>
-  </head>
-  <body>
-    <h1>brftools status</h1>
+  const body = `<h1>brftools status</h1>
     ${minecraftSection}
     ${tailscaleSection}
     <h2>Release history</h2>
     <p>Running version ${versionHtml(currentVersion)}. Each row is one start of the app; rollbacks appear as an older version starting again.</p>
-    ${table}
-  </body>
-</html>
-`;
+    ${table}`;
+  return page({ title: "brftools status", body, refreshSeconds: 60 });
 }
 
 // Player counts only: names are deliberately never shown on this public page.
-function serverCard({ server, state, checkedAt, result }: ServerStatus, now: Date): string {
+function serverCard({ server, state, checkedAt, result }: ServerStatus, now: Date, adminUrl: string): string {
   const title = (state === "online" && result?.motd) || server.name;
   const label = { unknown: "Checking…", online: "Online", offline: "Offline" }[state];
+  const heading =
+    adminUrl && server.id
+      ? `<a class="card-link" href="${escapeHtml(`${adminUrl}/servers/${server.id}`)}">${escapeHtml(title)}</a>`
+      : escapeHtml(title);
 
   const details: [string, string][] = [];
   if (state === "online" && result) {
@@ -153,7 +137,7 @@ function serverCard({ server, state, checkedAt, result }: ServerStatus, now: Dat
   const checked = checkedAt ? `Checked ${ago(checkedAt, now)} ago` : "Not checked yet";
 
   return `<section class="server">
-        <h3>${escapeHtml(title)}</h3>
+        <h3>${heading}</h3>
         <span class="state ${state}">${label}</span>
         ${detailList(details)}
         <p class="checked">${checked}</p>
@@ -214,34 +198,14 @@ function tailscaleCard({ state, snapshot }: TailscaleView, now: Date): string {
       </section>`;
 }
 
-// Values are HTML already: callers escape anything that came from outside.
-function detailList(details: [string, string][]): string {
-  return details.length ? `<dl>${details.map(([term, value]) => `<dt>${term}</dt><dd>${value}</dd>`).join("")}</dl>` : "";
-}
-
-function ago(then: Date, now: Date): string {
-  const seconds = Math.max(0, Math.round((now.getTime() - then.getTime()) / 1000));
-  if (seconds < 90) return `${seconds} s`;
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 90) return `${minutes} min`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours} h`;
-  return `${Math.round(hours / 24)} days`;
-}
-
 // A full commit SHA links to that commit; anything else (such as "dev") is plain text.
 function versionHtml(version: string): string {
   const code = `<code>${escapeHtml(version)}</code>`;
   return /^[0-9a-f]{40}$/.test(version) ? `<a href="${COMMIT_URL}${version}">${code}</a>` : code;
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+function hostOf(req: IncomingMessage): string {
+  return (req.headers.host ?? "").toLowerCase().replace(/:\d+$/, "");
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
