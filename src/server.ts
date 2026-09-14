@@ -2,6 +2,7 @@ import { createApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { createPool, migrate, recordRelease } from "./db.ts";
 import { createMonitor } from "./minecraft.ts";
+import { readTailscale } from "./tailscale.ts";
 
 const config = loadConfig();
 const pool = createPool(config.databaseUrl);
@@ -20,7 +21,11 @@ await recordRelease(pool, config.appVersion);
 const minecraft = createMonitor(config.minecraftServers);
 minecraft.start();
 
-const server = createApp(config, pool, minecraft.statuses);
+const { tailscaleStatusFile } = config;
+const server = createApp(config, pool, {
+  minecraft: minecraft.statuses,
+  tailscale: tailscaleStatusFile ? () => readTailscale(tailscaleStatusFile) : undefined,
+});
 server.listen(config.port, () => {
   console.log(`listening on port ${config.port} (version ${config.appVersion})`);
 });

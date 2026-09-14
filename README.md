@@ -46,7 +46,7 @@ TCP only (`unix_socket_directories=`) avoids macOS's 103-byte limit on socket pa
 AGENTS.md            rules for AI-assisted changes (CLAUDE.md points here)
 PRODUCT.md           purpose, users and acceptance criteria
 docs/                intake checklist, deployment profiles, decisions
-src/                 config.ts, db.ts (pool, migrations, queries), minecraft.ts (status ping), app.ts, server.ts
+src/                 config.ts, db.ts (pool, migrations, queries), minecraft.ts (status ping), tailscale.ts (host summary), app.ts, server.ts
 migrations/          numbered SQL migrations, applied in order at startup
 tests/               node:test tests
 Dockerfile           production image
@@ -71,12 +71,27 @@ compose.yml          production runtime declaration
 | `MC_n_NAME` | Name shown for that server when it is offline or not yet checked (its MOTD is shown when online) | required with `MC_n_PING` |
 | `MC_n_JOIN` | Free text shown as the address to join | none |
 | `MC_n_MAP_URL` | `http`/`https` link to that server's web map | none |
+| `TAILSCALE_STATUS_FILE` | Absolute path, inside the container, of the Tailscale summary written by the host. Unset hides the section | none |
 
 Real values never go in the repository. In production, `.env` is rendered from 1Password at deploy time.
 
 ### Minecraft section
 
 The app pings each configured server every 30 seconds with the Minecraft Server List Ping — the status query a game client uses, which needs no credential — with a 3-second timeout, and keeps the latest result in memory. Page views never open a connection. The page shows name, online/offline, version and `online / max` players; **player names are never shown**. A server being offline never affects `/healthz`, so a game server restart cannot roll this app back. Offline/online changes are logged.
+
+### Tailscale section
+
+Shows whether the host is connected to its tailnet, for troubleshooting remote access. The container is **not** given the host's `tailscaled` socket, which allows changes as well as reads. Instead, a timer on the host runs `tailscale status --json` every minute and writes a trimmed summary to `status.json` in a directory that `compose.yml` mounts read-only at `/run/tailscale-status`. The summary holds backend state, health warnings, the home relay, and each other device's name, OS and online state — no IP addresses, keys or tailnet names. The file is read on each page view:
+
+| Shown | When |
+|---|---|
+| Connected | Snapshot under 3 minutes old, backend `Running`, connected to Tailscale, no health warnings |
+| Connected, with warnings | As above, with health warnings listed |
+| Needs login, Stopped, Not responding… | Backend not running normally, or not connected to Tailscale |
+| No recent update | Snapshot older than 3 minutes — the host timer has stopped |
+| No data | File missing or unreadable |
+
+**Device names are shown on this public page** by the owner's decision. As with Minecraft, Tailscale state never affects `/healthz`. The host script and timer are not part of this repository.
 
 ## Persistent data
 
@@ -89,7 +104,7 @@ Schema changes are numbered files in `migrations/`, applied once each at startup
 ## Deploy, verify, roll back
 
 - **Deploy:** merge a passing pull request to `main`. CI passes, then `deploy.yml` publishes `ghcr.io/namcoza/brftools-status:<full sha>` and moves `:main` to it. The P410 picks up the new `:main` digest within a few minutes.
-- **Verify:** `GET /healthz` returns `{"status":"ok","version":"<commit sha>","database":"ok"}` (plus a `minecraft` list of names and states when servers are configured), and the home page shows that version in the release history.
+- **Verify:** `GET /healthz` returns `{"status":"ok","version":"<commit sha>","database":"ok"}` (plus a `minecraft` list of names and states, and a `tailscale` state, when those are configured), and the home page shows that version in the release history.
 - **Roll back:** on the P410, run the deploy script with `--rollback` to return to the previous image digest. A release that fails its health check is rolled back automatically.
 
 ## Repository settings
