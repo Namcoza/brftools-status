@@ -5,6 +5,17 @@ import { after, before, describe, test } from "node:test";
 import { createApp, renderPage } from "../src/app.ts";
 import { loadConfig } from "../src/config.ts";
 import { createPool, listReleases, migrate, recordRelease, type Pool } from "../src/db.ts";
+import type { MinecraftServerConfig, ServerStatus } from "../src/minecraft.ts";
+
+const family: MinecraftServerConfig = {
+  name: "Family",
+  host: "family.example",
+  port: 25565,
+  join: "Java family.example:25565",
+  mapUrl: "https://map.example/",
+};
+const crossplay: MinecraftServerConfig = { name: "Crossplay", host: "crossplay.example", port: 25565, join: "", mapUrl: "" };
+const offline: ServerStatus[] = [{ server: family, state: "offline", checkedAt: null, result: null }];
 
 const migrationsDir = new URL("../migrations/", import.meta.url);
 const databaseUrl = process.env.TEST_DATABASE_URL ?? "";
@@ -39,6 +50,55 @@ describe("renderPage", () => {
     assert.equal(html.split(link).length - 1, 2, "running version and table row are both linked");
     assert.doesNotMatch(renderPage("dev", []), /<a href=/);
   });
+
+  test("omits the Minecraft section when no servers are configured", () => {
+    assert.doesNotMatch(renderPage("dev", []), /Minecraft/);
+  });
+
+  test("shows each Minecraft server's state, counts, version, join address and map", () => {
+    const now = new Date("2026-09-14T12:00:30Z");
+    const html = renderPage(
+      "dev",
+      [],
+      [
+        {
+          server: family,
+          state: "online",
+          checkedAt: new Date("2026-09-14T12:00:18Z"),
+          result: { motd: "Family Server", version: "26.2", playersOnline: 3, playersMax: 20 },
+        },
+        { server: crossplay, state: "offline", checkedAt: new Date("2026-09-14T12:00:25Z"), result: null },
+      ],
+      now,
+    );
+    assert.match(html, /<h2>Minecraft<\/h2>/);
+    assert.match(html, /<h3>Family Server<\/h3>\s*<span class="state online">Online<\/span>/);
+    assert.match(html, /<dt>Players<\/dt><dd>3 \/ 20<\/dd><dt>Version<\/dt><dd>26.2<\/dd>/);
+    assert.match(html, /<dt>Join<\/dt><dd>Java family.example:25565<\/dd>/);
+    assert.match(html, /<a href="https:\/\/map.example\/">Open the map<\/a>/);
+    assert.match(html, /Checked 12 s ago/);
+    // Offline: falls back to the configured name, and shows no stale counts.
+    assert.match(html, /<h3>Crossplay<\/h3>\s*<span class="state offline">Offline<\/span>\s*<p class="checked">Checked 5 s ago/);
+    assert.ok(html.indexOf("<h2>Minecraft</h2>") < html.indexOf("<h2>Release history</h2>"));
+  });
+
+  test("escapes values reported by a Minecraft server", () => {
+    const html = renderPage(
+      "dev",
+      [],
+      [
+        {
+          server: crossplay,
+          state: "online",
+          checkedAt: null,
+          result: { motd: "<img src=x onerror=alert(1)>", version: '"><script>', playersOnline: 0, playersMax: 20 },
+        },
+      ],
+    );
+    assert.match(html, /<h3>&lt;img src=x onerror=alert\(1\)&gt;<\/h3>/);
+    assert.doesNotMatch(html, /<img|<script>/);
+    assert.match(html, /Not checked yet/);
+  });
 });
 
 describe("with a database", { skip: skipDatabase }, () => {
@@ -53,7 +113,8 @@ describe("with a database", { skip: skipDatabase }, () => {
     }
     pool = createPool(databaseUrl);
     await pool.query("DROP TABLE IF EXISTS releases, schema_migrations");
-    server = createApp(loadConfig({ DATABASE_URL: databaseUrl, APP_VERSION: "test-sha" }), pool);
+    // Every Minecraft server is offline: the app must still report healthy.
+    server = createApp(loadConfig({ DATABASE_URL: databaseUrl, APP_VERSION: "test-sha" }), pool, () => offline);
     baseUrl = await listen(server);
   });
 
@@ -77,10 +138,15 @@ describe("with a database", { skip: skipDatabase }, () => {
     );
   });
 
-  test("GET /healthz reports ok, the version and the database", async () => {
+  test("GET /healthz reports ok while every Minecraft server is offline", async () => {
     const res = await fetch(`${baseUrl}/healthz`);
     assert.equal(res.status, 200);
-    assert.deepEqual(await res.json(), { status: "ok", version: "test-sha", database: "ok" });
+    assert.deepEqual(await res.json(), {
+      status: "ok",
+      version: "test-sha",
+      database: "ok",
+      minecraft: [{ name: "Family", state: "offline" }],
+    });
   });
 
   test("GET / lists the release history", async () => {
@@ -90,6 +156,7 @@ describe("with a database", { skip: skipDatabase }, () => {
     const html = await res.text();
     assert.match(html, /test-sha/);
     assert.match(html, /older-sha/);
+    assert.match(html, /<span class="state offline">Offline<\/span>/);
   });
 
   test("unknown paths return 404", async () => {

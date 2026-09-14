@@ -1,6 +1,6 @@
 # brftools-status
 
-Release history for the brftools P410 deploy pilot. Each time a version of the app starts, it records the version and start time in PostgreSQL and lists them on its home page. See [`PRODUCT.md`](PRODUCT.md) for purpose and acceptance criteria.
+Status page for the brftools P410 deploy pilot. Each time a version of the app starts, it records the version and start time in PostgreSQL and lists them on its home page. Above that, it shows whether each configured Minecraft server is up and how many players are online. See [`PRODUCT.md`](PRODUCT.md) for purpose and acceptance criteria.
 
 **branch = work · pull request = validation · main = live**
 
@@ -46,7 +46,7 @@ TCP only (`unix_socket_directories=`) avoids macOS's 103-byte limit on socket pa
 AGENTS.md            rules for AI-assisted changes (CLAUDE.md points here)
 PRODUCT.md           purpose, users and acceptance criteria
 docs/                intake checklist, deployment profiles, decisions
-src/                 config.ts, db.ts (pool, migrations, queries), app.ts, server.ts
+src/                 config.ts, db.ts (pool, migrations, queries), minecraft.ts (status ping), app.ts, server.ts
 migrations/          numbered SQL migrations, applied in order at startup
 tests/               node:test tests
 Dockerfile           production image
@@ -67,8 +67,16 @@ compose.yml          production runtime declaration
 | `DATABASE_URL` | PostgreSQL connection string, including credentials | required |
 | `PORT` | Port the server listens on | `3000` |
 | `APP_VERSION` | Version recorded and reported; the image sets it to the commit SHA | `dev` |
+| `MC_n_PING` | Minecraft server `host:port` to ping, as reachable from the container. `n` is 1–4; a server is shown only when this is set | none |
+| `MC_n_NAME` | Name shown for that server when it is offline or not yet checked (its MOTD is shown when online) | required with `MC_n_PING` |
+| `MC_n_JOIN` | Free text shown as the address to join | none |
+| `MC_n_MAP_URL` | `http`/`https` link to that server's web map | none |
 
 Real values never go in the repository. In production, `.env` is rendered from 1Password at deploy time.
+
+### Minecraft section
+
+The app pings each configured server every 30 seconds with the Minecraft Server List Ping — the status query a game client uses, which needs no credential — with a 3-second timeout, and keeps the latest result in memory. Page views never open a connection. The page shows name, online/offline, version and `online / max` players; **player names are never shown**. A server being offline never affects `/healthz`, so a game server restart cannot roll this app back. Offline/online changes are logged.
 
 ## Persistent data
 
@@ -81,7 +89,7 @@ Schema changes are numbered files in `migrations/`, applied once each at startup
 ## Deploy, verify, roll back
 
 - **Deploy:** merge a passing pull request to `main`. CI passes, then `deploy.yml` publishes `ghcr.io/namcoza/brftools-status:<full sha>` and moves `:main` to it. The P410 picks up the new `:main` digest within a few minutes.
-- **Verify:** `GET /healthz` returns `{"status":"ok","version":"<commit sha>","database":"ok"}`, and the home page shows that version at the top.
+- **Verify:** `GET /healthz` returns `{"status":"ok","version":"<commit sha>","database":"ok"}` (plus a `minecraft` list of names and states when servers are configured), and the home page shows that version in the release history.
 - **Roll back:** on the P410, run the deploy script with `--rollback` to return to the previous image digest. A release that fails its health check is rolled back automatically.
 
 ## Repository settings
