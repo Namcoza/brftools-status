@@ -42,6 +42,11 @@ services:
     # replacement of status.json is visible inside the container.
     volumes:
       - ./tailscale:/run/tailscale-status:ro
+      # Minecraft admin menu (README, "Admin menu"): requests for the host's runner are written
+      # to the inbox; the runner's progress, server state and history come back read-only.
+      # Docker, RCON and container names stay on the host.
+      - ./mc-actions/inbox:/run/mc-actions/inbox
+      - ./mc-actions/state:/run/mc-actions/state:ro
 
     # Persistent data: none in the container. Release history lives in the "status"
     # database on the shared PostgreSQL instance — see "Persistent data" in README.md.

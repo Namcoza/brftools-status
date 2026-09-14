@@ -29,6 +29,8 @@ const statusJson = JSON.stringify({
   favicon: "data:image/png;base64,AAAA",
 });
 
+const expected = { motd: "Test Server", version: "Paper 26.2", playersOnline: 2, playersMax: 20, playerNames: ["SomePlayer"] };
+
 describe("VarInt", () => {
   test("encodes known values", () => {
     assert.deepEqual([...encodeVarInt(0)], [0x00]);
@@ -54,20 +56,20 @@ describe("status response", () => {
     assert.equal(readStatusResponse(full), statusJson);
   });
 
-  test("keeps MOTD, version and counts, and drops player names", () => {
-    const result = parseStatus(statusJson);
-    assert.deepEqual(result, { motd: "Test Server", version: "Paper 26.2", playersOnline: 2, playersMax: 20 });
-    assert.doesNotMatch(JSON.stringify(result), /SomePlayer/);
+  test("keeps MOTD, version, counts and the sampled player names", () => {
+    assert.deepEqual(parseStatus(statusJson), expected);
   });
 
-  test("accepts a plain-string MOTD and tolerates missing fields", () => {
-    assert.deepEqual(parseStatus(JSON.stringify({ description: "§lHello\n§rthere" })), {
+  test("accepts a plain-string MOTD and tolerates missing or odd fields", () => {
+    const odd = { description: "§lHello\n§rthere", players: { sample: [{ name: "§aKid" }, { id: "no-name" }, "junk", { name: "x".repeat(40) }] } };
+    assert.deepEqual(parseStatus(JSON.stringify(odd)), {
       motd: "Hello there",
       version: "",
       playersOnline: 0,
       playersMax: 0,
+      playerNames: ["Kid"],
     });
-    assert.deepEqual(parseStatus("null"), { motd: "", version: "", playersOnline: 0, playersMax: 0 });
+    assert.deepEqual(parseStatus("null"), { motd: "", version: "", playersOnline: 0, playersMax: 0, playerNames: [] });
   });
 });
 
@@ -108,8 +110,7 @@ describe("pingServer", () => {
     });
     const port = await listen(server);
 
-    const result = await pingServer("127.0.0.1", port, 2000);
-    assert.deepEqual(result, { motd: "Test Server", version: "Paper 26.2", playersOnline: 2, playersMax: 20 });
+    assert.deepEqual(await pingServer("127.0.0.1", port, 2000), expected);
     assert.deepEqual(handshake, { port, nextState: 1 });
   });
 
@@ -133,17 +134,18 @@ describe("pingServer", () => {
 
 describe("createMonitor", () => {
   const servers: MinecraftServerConfig[] = [
-    { name: "Up", host: "up.example", port: 25565, join: "", mapUrl: "" },
-    { name: "Down", host: "down.example", port: 25565, join: "", mapUrl: "" },
+    { id: "up", name: "Up", host: "up.example", port: 25565, join: "", mapUrl: "" },
+    { id: "down", name: "Down", host: "down.example", port: 25565, join: "", mapUrl: "" },
   ];
   const checkedAt = new Date("2026-09-14T12:00:00Z");
+  const upResult = { motd: "Up", version: "26.2", playersOnline: 1, playersMax: 20, playerNames: ["Kid"] };
 
   test("starts unknown, then records each server's result independently", async () => {
     const monitor = createMonitor(servers, {
       now: () => checkedAt,
       ping: async (host) => {
         if (host === "down.example") throw new Error("connection refused");
-        return { motd: "Up", version: "26.2", playersOnline: 1, playersMax: 20 };
+        return upResult;
       },
     });
     assert.deepEqual(
@@ -153,12 +155,7 @@ describe("createMonitor", () => {
 
     await monitor.refresh();
     const [up, down] = monitor.statuses();
-    assert.deepEqual(up, {
-      server: servers[0],
-      state: "online",
-      checkedAt,
-      result: { motd: "Up", version: "26.2", playersOnline: 1, playersMax: 20 },
-    });
+    assert.deepEqual(up, { server: servers[0], state: "online", checkedAt, result: upResult });
     assert.deepEqual(down, { server: servers[1], state: "offline", checkedAt, result: null });
   });
 

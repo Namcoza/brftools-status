@@ -1,3 +1,5 @@
+import { createAccessVerifier } from "./access.ts";
+import { createAdminHandler } from "./admin.ts";
 import { createApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { createPool, migrate, recordRelease } from "./db.ts";
@@ -21,11 +23,26 @@ await recordRelease(pool, config.appVersion);
 const minecraft = createMonitor(config.minecraftServers);
 minecraft.start();
 
-const { tailscaleStatusFile } = config;
+const { tailscaleStatusFile, admin } = config;
 const server = createApp(config, pool, {
   minecraft: minecraft.statuses,
   tailscale: tailscaleStatusFile ? () => readTailscale(tailscaleStatusFile) : undefined,
+  // The private admin menu: only on its own hostname, only with a valid Access token.
+  admin: admin
+    ? {
+        hostname: admin.hostname,
+        handle: createAdminHandler({
+          hostname: admin.hostname,
+          verifier: createAccessVerifier({ teamDomain: admin.teamDomain, audience: admin.audience }),
+          servers: config.minecraftServers,
+          minecraft: minecraft.statuses,
+          inboxDir: admin.inboxDir,
+          stateDir: admin.stateDir,
+        }),
+      }
+    : undefined,
 });
+if (admin) console.log(`admin menu enabled for ${admin.hostname}`);
 server.listen(config.port, () => {
   console.log(`listening on port ${config.port} (version ${config.appVersion})`);
 });

@@ -5,6 +5,8 @@ import { connect } from "node:net";
 // https://minecraft.wiki/w/Java_Edition_protocol/Server_List_Ping
 
 export interface MinecraftServerConfig {
+  // Slug used by the admin menu and the host runner; empty when the admin menu is not configured.
+  id: string;
   name: string;
   host: string;
   port: number;
@@ -17,6 +19,7 @@ export interface PingResult {
   version: string;
   playersOnline: number;
   playersMax: number;
+  playerNames: string[];
 }
 
 export interface ServerStatus {
@@ -85,12 +88,13 @@ export function readStatusResponse(buffer: Buffer): string | null {
   return buffer.toString("utf8", offset, offset + text.value);
 }
 
-// Deliberately ignores players.sample: player names are not shown on the public page.
+// Player names (players.sample, up to 12 from the server) are kept for the private admin menu
+// only. The public page renders counts and never names.
 export function parseStatus(json: string): PingResult {
   const status = (JSON.parse(json) ?? {}) as {
     description?: unknown;
     version?: { name?: unknown };
-    players?: { online?: unknown; max?: unknown };
+    players?: { online?: unknown; max?: unknown; sample?: unknown };
   };
   return {
     motd: flattenText(status.description)
@@ -100,7 +104,18 @@ export function parseStatus(json: string): PingResult {
     version: typeof status.version?.name === "string" ? status.version.name : "",
     playersOnline: toCount(status.players?.online),
     playersMax: toCount(status.players?.max),
+    playerNames: toNames(status.players?.sample),
   };
+}
+
+function toNames(sample: unknown): string[] {
+  if (!Array.isArray(sample)) return [];
+  return sample
+    .map((entry) => (entry && typeof entry === "object" ? (entry as { name?: unknown }).name : undefined))
+    .filter((name): name is string => typeof name === "string")
+    .map((name) => name.replace(/§./gu, "").trim())
+    .filter((name) => name.length > 0 && name.length <= 32)
+    .slice(0, 20);
 }
 
 // The MOTD is either a plain string or a JSON text component with nested "extra" parts.
