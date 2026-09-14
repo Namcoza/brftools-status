@@ -7,6 +7,7 @@ export interface Config {
   appVersion: string;
   databaseUrl: string;
   minecraftServers: MinecraftServerConfig[];
+  tailscaleStatusFile: string;
 }
 
 const MAX_MINECRAFT_SERVERS = 4;
@@ -24,11 +25,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error("DATABASE_URL must be set");
   }
 
+  // Written by a timer on the host and mounted read-only; unset hides the Tailscale section.
+  const tailscaleStatusFile = env.TAILSCALE_STATUS_FILE || "";
+  if (tailscaleStatusFile && !tailscaleStatusFile.startsWith("/")) {
+    throw new Error(`TAILSCALE_STATUS_FILE must be an absolute path, got "${tailscaleStatusFile}"`);
+  }
+
   return {
     port,
     appVersion: env.APP_VERSION || "dev",
     databaseUrl,
     minecraftServers: loadMinecraftServers(env),
+    tailscaleStatusFile,
   };
 }
 

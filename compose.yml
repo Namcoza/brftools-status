@@ -37,6 +37,12 @@ services:
         aliases:
           - brftools-status
 
+    # Tailscale summary written every minute by a timer on the host (README, "Tailscale
+    # section"). Read-only, and a directory rather than a file so that the host's atomic
+    # replacement of status.json is visible inside the container.
+    volumes:
+      - ./tailscale:/run/tailscale-status:ro
+
     # Persistent data: none in the container. Release history lives in the "status"
     # database on the shared PostgreSQL instance — see "Persistent data" in README.md.
 

@@ -6,6 +6,7 @@ import { createApp, renderPage } from "../src/app.ts";
 import { loadConfig } from "../src/config.ts";
 import { createPool, listReleases, migrate, recordRelease, type Pool } from "../src/db.ts";
 import type { MinecraftServerConfig, ServerStatus } from "../src/minecraft.ts";
+import type { TailscaleSnapshot, TailscaleView } from "../src/tailscale.ts";
 
 const family: MinecraftServerConfig = {
   name: "Family",
@@ -57,10 +58,8 @@ describe("renderPage", () => {
 
   test("shows each Minecraft server's state, counts, version, join address and map", () => {
     const now = new Date("2026-09-14T12:00:30Z");
-    const html = renderPage(
-      "dev",
-      [],
-      [
+    const html = renderPage("dev", [], {
+      minecraft: [
         {
           server: family,
           state: "online",
@@ -70,7 +69,7 @@ describe("renderPage", () => {
         { server: crossplay, state: "offline", checkedAt: new Date("2026-09-14T12:00:25Z"), result: null },
       ],
       now,
-    );
+    });
     assert.match(html, /<h2>Minecraft<\/h2>/);
     assert.match(html, /<h3>Family Server<\/h3>\s*<span class="state online">Online<\/span>/);
     assert.match(html, /<dt>Players<\/dt><dd>3 \/ 20<\/dd><dt>Version<\/dt><dd>26.2<\/dd>/);
@@ -83,10 +82,8 @@ describe("renderPage", () => {
   });
 
   test("escapes values reported by a Minecraft server", () => {
-    const html = renderPage(
-      "dev",
-      [],
-      [
+    const html = renderPage("dev", [], {
+      minecraft: [
         {
           server: crossplay,
           state: "online",
@@ -94,10 +91,75 @@ describe("renderPage", () => {
           result: { motd: "<img src=x onerror=alert(1)>", version: '"><script>', playersOnline: 0, playersMax: 20 },
         },
       ],
-    );
+    });
     assert.match(html, /<h3>&lt;img src=x onerror=alert\(1\)&gt;<\/h3>/);
     assert.doesNotMatch(html, /<img|<script>/);
     assert.match(html, /Not checked yet/);
+  });
+});
+
+describe("renderPage: Tailscale", () => {
+  const now = new Date("2026-09-14T12:10:00Z");
+  const snapshot: TailscaleSnapshot = {
+    generatedAt: new Date("2026-09-14T12:09:30Z"),
+    backendState: "Running",
+    error: "",
+    online: true,
+    health: [],
+    relay: "lhr",
+    peers: [
+      { name: "laptop-example", os: "macOS", online: true, lastSeen: null },
+      { name: "phone-example", os: "iOS", online: false, lastSeen: new Date("2026-09-14T11:45:00Z") },
+    ],
+  };
+
+  test("omits the section when not configured", () => {
+    assert.doesNotMatch(renderPage("dev", []), /Tailscale/);
+  });
+
+  test("shows a connected host with its relay and devices, above the release history", () => {
+    const html = renderPage("dev", [], { tailscale: { state: "connected", snapshot }, now });
+    assert.match(html, /<h2>Tailscale<\/h2>/);
+    assert.match(html, /<span class="state online">Connected<\/span>/);
+    assert.match(html, /<dt>Relay<\/dt><dd>LHR<\/dd>/);
+    assert.match(html, /<li>laptop-example <span>macOS · online<\/span><\/li>/);
+    assert.match(html, /<li>phone-example <span>iOS · offline, last seen 25 min ago<\/span><\/li>/);
+    assert.match(html, /Updated 30 s ago/);
+    assert.ok(html.indexOf("<h2>Tailscale</h2>") < html.indexOf("<h2>Release history</h2>"));
+  });
+
+  test("lists health warnings, escaped", () => {
+    const html = renderPage("dev", [], {
+      tailscale: { state: "degraded", snapshot: { ...snapshot, health: ["<b>DNS</b> unreachable"] } },
+      now,
+    });
+    assert.match(html, /<span class="state warning">Connected, with warnings<\/span>/);
+    assert.match(html, /<dt>Warning<\/dt><dd>&lt;b&gt;DNS&lt;\/b&gt; unreachable<\/dd>/);
+    assert.doesNotMatch(html, /<b>/);
+  });
+
+  test("names the reason when down, stale or missing", () => {
+    const page = (tailscale: TailscaleView) => renderPage("dev", [], { tailscale, now });
+    assert.match(
+      page({ state: "down", snapshot: { ...snapshot, backendState: "NeedsLogin", online: false } }),
+      /<span class="state offline">Needs login<\/span>/,
+    );
+    assert.match(page({ state: "down", snapshot: { ...snapshot, online: false } }), /Not connected to Tailscale/);
+    assert.match(
+      page({
+        state: "down",
+        snapshot: { ...snapshot, backendState: "Unavailable", online: false, error: "tailscale status failed (exit 1)", relay: "", peers: [] },
+      }),
+      /Not responding<\/span>\s*<dl><dt>Error<\/dt><dd>tailscale status failed \(exit 1\)<\/dd><\/dl>/,
+    );
+    assert.match(
+      page({ state: "stale", snapshot: { ...snapshot, generatedAt: new Date("2026-09-14T11:10:00Z") } }),
+      /<span class="state warning">No recent update<\/span>[\s\S]*Updated 60 min ago/,
+    );
+    assert.match(
+      page({ state: "missing", snapshot: null }),
+      /<span class="state offline">No data<\/span>[\s\S]*Status file missing or unreadable/,
+    );
   });
 });
 
@@ -113,8 +175,11 @@ describe("with a database", { skip: skipDatabase }, () => {
     }
     pool = createPool(databaseUrl);
     await pool.query("DROP TABLE IF EXISTS releases, schema_migrations");
-    // Every Minecraft server is offline: the app must still report healthy.
-    server = createApp(loadConfig({ DATABASE_URL: databaseUrl, APP_VERSION: "test-sha" }), pool, () => offline);
+    // Every Minecraft server is offline and there is no Tailscale data: the app must still report healthy.
+    server = createApp(loadConfig({ DATABASE_URL: databaseUrl, APP_VERSION: "test-sha" }), pool, {
+      minecraft: () => offline,
+      tailscale: async () => ({ state: "missing", snapshot: null }),
+    });
     baseUrl = await listen(server);
   });
 
@@ -138,7 +203,7 @@ describe("with a database", { skip: skipDatabase }, () => {
     );
   });
 
-  test("GET /healthz reports ok while every Minecraft server is offline", async () => {
+  test("GET /healthz reports ok while Minecraft is offline and Tailscale data is missing", async () => {
     const res = await fetch(`${baseUrl}/healthz`);
     assert.equal(res.status, 200);
     assert.deepEqual(await res.json(), {
@@ -146,6 +211,7 @@ describe("with a database", { skip: skipDatabase }, () => {
       version: "test-sha",
       database: "ok",
       minecraft: [{ name: "Family", state: "offline" }],
+      tailscale: "missing",
     });
   });
 
@@ -157,6 +223,7 @@ describe("with a database", { skip: skipDatabase }, () => {
     assert.match(html, /test-sha/);
     assert.match(html, /older-sha/);
     assert.match(html, /<span class="state offline">Offline<\/span>/);
+    assert.match(html, /<span class="state offline">No data<\/span>/);
   });
 
   test("unknown paths return 404", async () => {

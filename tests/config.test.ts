@@ -54,6 +54,15 @@ test("invalid Minecraft configuration fails at startup", () => {
   );
 });
 
+test("TAILSCALE_STATUS_FILE is optional and must be an absolute path", () => {
+  assert.equal(loadConfig(required).tailscaleStatusFile, "");
+  assert.equal(
+    loadConfig({ ...required, TAILSCALE_STATUS_FILE: "/run/example/status.json" }).tailscaleStatusFile,
+    "/run/example/status.json",
+  );
+  assert.throws(() => loadConfig({ ...required, TAILSCALE_STATUS_FILE: "status.json" }), /must be an absolute path/);
+});
+
 test("DATABASE_URL is required and never echoed", () => {
   assert.throws(() => loadConfig({}), /^Error: DATABASE_URL must be set$/);
   assert.throws(() => loadConfig({ DATABASE_URL: "" }), /DATABASE_URL must be set/);
