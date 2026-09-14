@@ -1,6 +1,7 @@
 import { createApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { createPool, migrate, recordRelease } from "./db.ts";
+import { createMonitor } from "./minecraft.ts";
 
 const config = loadConfig();
 const pool = createPool(config.databaseUrl);
@@ -15,7 +16,11 @@ if (applied.length > 0) {
 }
 await recordRelease(pool, config.appVersion);
 
-const server = createApp(config, pool);
+// Pings the configured Minecraft servers in the background; does nothing if none are.
+const minecraft = createMonitor(config.minecraftServers);
+minecraft.start();
+
+const server = createApp(config, pool, minecraft.statuses);
 server.listen(config.port, () => {
   console.log(`listening on port ${config.port} (version ${config.appVersion})`);
 });
@@ -23,6 +28,7 @@ server.listen(config.port, () => {
 // Docker sends SIGTERM on stop; finish in-flight requests, then close the pool.
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => {
+    minecraft.stop();
     server.close(() => {
       void pool.end().then(() => process.exit(0));
     });
