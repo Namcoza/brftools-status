@@ -6,6 +6,7 @@ import {
   createMediaMonitor,
   parseArr,
   parseAudiobookshelf,
+  parseHttp,
   parsePlex,
   parseSabnzbd,
   type MediaServiceConfig,
@@ -39,6 +40,10 @@ describe("parsers", () => {
   test("SABnzbd: version", () => {
     assert.deepEqual(parseSabnzbd(SAB_JSON), { version: "5.1.3", setupIncomplete: false });
     assert.deepEqual(parseSabnzbd("{}"), { version: "", setupIncomplete: false });
+  });
+
+  test("http: answering at all is enough", () => {
+    assert.deepEqual(parseHttp(), { version: "", setupIncomplete: false });
   });
 
   test("Audiobookshelf: version and setup state, with its internal paths discarded", () => {
@@ -86,6 +91,28 @@ describe("checkService", () => {
     const port = await listenOn(closed);
     await new Promise((resolve) => closed.close(resolve));
     await assert.rejects(checkService(service("arr", `http://127.0.0.1:${port}/ping`), 2000));
+  });
+
+  test("http: a redirect counts as up, an error does not", async () => {
+    // LazyLibrarian redirects / to its landing page, and has no credential-free version.
+    const redirecting = await serve((_req, res) => {
+      res.writeHead(303, { location: "/home" });
+      res.end();
+    });
+    assert.deepEqual(await checkService(service("http", `${redirecting}/`), 2000), { version: "", setupIncomplete: false });
+
+    const missing = await serve((_req, res) => {
+      res.writeHead(404);
+      res.end("no");
+    });
+    await assert.rejects(checkService(service("http", `${missing}/`), 2000), /status 404/);
+
+    // The other kinds still require a 2xx, because their body is read.
+    const alsoRedirecting = await serve((_req, res) => {
+      res.writeHead(302, { location: "/elsewhere" });
+      res.end();
+    });
+    await assert.rejects(checkService(service("arr", `${alsoRedirecting}/ping`), 2000), /status 302/);
   });
 
   test("survives an absurdly large body", async () => {

@@ -5,9 +5,9 @@
 // Addresses live only in production configuration and are never rendered on the public page —
 // a card there links to the admin menu, which reveals the address after Cloudflare Access.
 
-export type MediaKind = "plex" | "arr" | "sabnzbd" | "audiobookshelf";
+export type MediaKind = "plex" | "arr" | "sabnzbd" | "audiobookshelf" | "http";
 
-export const MEDIA_KINDS: MediaKind[] = ["plex", "arr", "sabnzbd", "audiobookshelf"];
+export const MEDIA_KINDS: MediaKind[] = ["plex", "arr", "sabnzbd", "audiobookshelf", "http"];
 
 export interface MediaServiceConfig {
   id: string;
@@ -67,11 +67,18 @@ export function parseAudiobookshelf(body: string): MediaResult {
   };
 }
 
+// For a service with no credential-free version or health endpoint (LazyLibrarian, say): it is up
+// if it answers at all. A redirect counts — plenty of web UIs redirect the root to a landing page.
+export function parseHttp(): MediaResult {
+  return { version: "", setupIncomplete: false };
+}
+
 const PARSERS: Record<MediaKind, (body: string) => MediaResult> = {
   plex: parsePlex,
   arr: parseArr,
   sabnzbd: parseSabnzbd,
   audiobookshelf: parseAudiobookshelf,
+  http: parseHttp,
 };
 
 export const checkService: MediaCheck = async (service, timeoutMs) => {
@@ -80,7 +87,9 @@ export const checkService: MediaCheck = async (service, timeoutMs) => {
     headers: { accept: "application/json, text/xml, */*" },
     redirect: "manual",
   });
-  if (!response.ok) throw new Error(`status ${response.status}`);
+  // "http" accepts a redirect as an answer; the others must return 2xx, since their body is read.
+  const answered = service.kind === "http" ? response.status < 400 : response.ok;
+  if (!answered) throw new Error(`status ${response.status}`);
   const body = (await response.text()).slice(0, MAX_BODY_BYTES);
   return PARSERS[service.kind](body);
 };
