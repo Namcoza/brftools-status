@@ -6,12 +6,24 @@ import { join } from "node:path";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { AccessError, type AccessVerifier } from "../src/access.ts";
 import { createAdminHandler } from "../src/admin.ts";
+import type { MediaServiceConfig, MediaStatus } from "../src/media.ts";
 import type { MinecraftServerConfig, ServerStatus } from "../src/minecraft.ts";
 import { listenOn, send } from "./http-helper.ts";
 
 const hostname = "admin.example.com";
 const family: MinecraftServerConfig = { id: "family", name: "Family", host: "family.example", port: 25565, join: "", mapUrl: "" };
 const crossplay: MinecraftServerConfig = { id: "crossplay", name: "Crossplay", host: "crossplay.example", port: 25565, join: "", mapUrl: "" };
+const plexService: MediaServiceConfig = {
+  id: "plex",
+  name: "Plex",
+  kind: "plex",
+  checkUrl: "http://plex.example:32400/identity",
+  url: "http://tailnet.example:32400/web",
+  lanUrl: "http://lan.example:32400/web",
+};
+const mediaStatuses: MediaStatus[] = [
+  { service: plexService, state: "up", checkedAt: new Date(), result: { version: "1.43.4.10903", setupIncomplete: false } },
+];
 
 // Stands in for Cloudflare Access; the real verification is tested in access.test.ts.
 const verifier: AccessVerifier = {
@@ -61,6 +73,8 @@ before(async () => {
     verifier,
     servers: [family, crossplay],
     minecraft: () => statuses,
+    mediaServices: [plexService],
+    media: () => mediaStatuses,
     inboxDir: inbox,
     stateDir: state,
   });
@@ -110,6 +124,8 @@ describe("admin menu access", () => {
       ["GET", "/servers/family/confirm?action=restart"],
       ["POST", "/servers/family/actions"],
       ["GET", `/actions/${"a".repeat(32)}`],
+      ["GET", "/media"],
+      ["GET", "/open/plex"],
       ["GET", "/no-such-page"],
     ] as const;
     const tokens: Record<string, string>[] = [{}, { "cf-access-jwt-assertion": "forged-token" }];
@@ -290,6 +306,29 @@ describe("admin menu actions", () => {
     const { body } = await get(`/actions/${id}`);
     assert.match(body, /<span class="state bad">(<svg[^>]*>.*?<\/svg>)?Failed<\/span>/);
     assert.match(body, /<pre class="log">&lt;b&gt;crash&lt;\/b&gt;<\/pre>/);
+  });
+
+  test("the media page shows the addresses, and /open redirects to the Tailscale one", async () => {
+    const page = await get("/media");
+    assert.equal(page.status, 200);
+    assert.match(page.body, /<h1>Media services<\/h1>/);
+    assert.match(page.body, /<span class="state ok">(<svg[^>]*>.*?<\/svg>)?Up<\/span>/);
+    assert.match(page.body, /<dt>Version<\/dt><dd>1.43.4.10903<\/dd>/);
+    assert.match(page.body, /<dt>Tailscale<\/dt><dd><a href="http:\/\/tailnet.example:32400\/web">tailnet.example:32400<\/a>/);
+    assert.match(page.body, /<dt>Home network<\/dt><dd><a href="http:\/\/lan.example:32400\/web">lan.example:32400<\/a>/);
+    assert.match((await get("/")).body, /href="\/media">Media services<\/a>/);
+
+    const open = await get("/open/plex");
+    assert.equal(open.status, 302);
+    assert.equal(open.headers.location, "http://tailnet.example:32400/web");
+  });
+
+  test("/open only redirects to a configured service", async () => {
+    for (const path of ["/open/nope", "/open/https:%2F%2Fevil.example", "/open/plex/extra", "/open"]) {
+      const reply = await get(path);
+      assert.equal(reply.status, 404, path);
+      assert.equal(reply.headers.location, undefined, path);
+    }
   });
 
   test("unknown routes are not found", async () => {

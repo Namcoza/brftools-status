@@ -80,6 +80,12 @@ Constraints that shape it: system fonts, inline CSS and inline SVG only (the adm
 | `MC_n_JOIN` | Free text shown as the address to join | none |
 | `MC_n_MAP_URL` | `http`/`https` link to that server's web map | none |
 | `TAILSCALE_STATUS_FILE` | Absolute path, inside the container, of the Tailscale summary written by the host. Unset hides the section | none |
+| `MEDIA_n_CHECK` | Credential-free health URL for a media service, reachable from the container. `n` is 1–8; a service exists only when this is set | none |
+| `MEDIA_n_ID` | Slug used by the admin menu's `/open/<id>` | required with `MEDIA_n_CHECK` |
+| `MEDIA_n_NAME` | Name shown publicly | required with `MEDIA_n_CHECK` |
+| `MEDIA_n_KIND` | `plex`, `arr`, `sabnzbd` or `audiobookshelf` — chooses how the response is read | required with `MEDIA_n_CHECK` |
+| `MEDIA_n_URL` | Where `/open/<id>` sends a signed-in browser | required with `MEDIA_n_CHECK` |
+| `MEDIA_n_LAN_URL` | Home-network address, listed on the admin menu's media page | none |
 | `ADMIN_HOSTNAME` | Hostname the private admin menu is served on. The admin menu is on only when this and the next four are all set | none |
 | `ACCESS_TEAM_DOMAIN` | Cloudflare Access team domain, e.g. `<team>.cloudflareaccess.com`; its signing keys verify admin requests | none |
 | `ACCESS_AUD` | Audience tag of the Access application protecting `ADMIN_HOSTNAME` | none |
@@ -108,6 +114,15 @@ Shows whether the host is connected to its tailnet, for troubleshooting remote a
 | No data | File missing or unreadable |
 
 **Device names are shown on this public page** by the owner's decision. As with Minecraft, Tailscale state never affects `/healthz`. The host script and timer are not part of this repository.
+
+### Media section
+
+Shows whether each configured media service is up: name, state and — where the service gives it away without a credential — its version. Audiobookshelf also reports whether its setup is finished.
+
+- **No credentials, ever.** Each `MEDIA_n_CHECK` endpoint answers unauthenticated: Plex `/identity`, Sonarr and Radarr `/ping`, SABnzbd `/api?mode=version&output=json`, Audiobookshelf `/status`. The app holds no API key and can only read. Sonarr and Radarr therefore show up or down only; their version needs a key.
+- **No addresses on the public page.** Each card is a link to `https://<ADMIN_HOSTNAME>/open/<id>`, so Cloudflare Access sits between the click and the address. The admin menu's `/media` page is the only place a service's address is shown, and `/open/<id>` redirects to `MEDIA_n_URL`. The id is a key into the configured list, never a URL, so it cannot be turned into an open redirect.
+- **Polling, not per-request:** every 30 seconds with a 3-second timeout, held in memory. Any non-200, timeout or unreadable body is "Down". Audiobookshelf's `ConfigPath` and `MetadataPath` are discarded at parse time.
+- A service being down never affects `/healthz`.
 
 ### Admin menu
 

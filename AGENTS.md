@@ -40,6 +40,7 @@ Requires Node 24 (see `.nvmrc`) and, for the secrets scan, `gitleaks` (`brew ins
 | | Changing the hosting profile | Mount the Docker socket, use `privileged` or host networking |
 | | Deleting data or changing the backup declaration | Touch the children's games or backup jobs |
 | | Changing what the admin menu can do to Minecraft | Act on Minecraft other than by writing allow-listed requests for the host runner (README, "Admin menu"); add a console, free-text commands, RCON or Docker access |
+| | Adding a service to the media section | Hold an API key or login for a service this app reports on, act on one, or put a media address on the public page |
 
 ## This repository is public
 
