@@ -3,6 +3,7 @@ import { createAdminHandler } from "./admin.ts";
 import { createApp } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { createPool, migrate, recordRelease } from "./db.ts";
+import { createMediaMonitor } from "./media.ts";
 import { createMonitor } from "./minecraft.ts";
 import { readTailscale } from "./tailscale.ts";
 
@@ -23,9 +24,14 @@ await recordRelease(pool, config.appVersion);
 const minecraft = createMonitor(config.minecraftServers);
 minecraft.start();
 
+// Read-only checks of the media services; no credentials, and nothing is shown publicly but state.
+const media = createMediaMonitor(config.mediaServices);
+media.start();
+
 const { tailscaleStatusFile, admin } = config;
 const server = createApp(config, pool, {
   minecraft: minecraft.statuses,
+  media: media.statuses,
   tailscale: tailscaleStatusFile ? () => readTailscale(tailscaleStatusFile) : undefined,
   // The private admin menu: only on its own hostname, only with a valid Access token.
   admin: admin
@@ -36,6 +42,8 @@ const server = createApp(config, pool, {
           verifier: createAccessVerifier({ teamDomain: admin.teamDomain, audience: admin.audience }),
           servers: config.minecraftServers,
           minecraft: minecraft.statuses,
+          mediaServices: config.mediaServices,
+          media: media.statuses,
           inboxDir: admin.inboxDir,
           stateDir: admin.stateDir,
           nav: config.nav,
@@ -52,6 +60,7 @@ server.listen(config.port, () => {
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => {
     minecraft.stop();
+    media.stop();
     server.close(() => {
       void pool.end().then(() => process.exit(0));
     });

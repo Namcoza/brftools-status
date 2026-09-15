@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Config, NavConfig } from "./config.ts";
 import { isDatabaseReachable, listReleases, type Pool, type Release } from "./db.ts";
 import { ago, detailList, escapeHtml, FAVICON_SVG, page, statusPill, type NavLinks, type Tone } from "./html.ts";
+import type { MediaStatus } from "./media.ts";
 import type { ServerStatus } from "./minecraft.ts";
 import type { TailscaleView } from "./tailscale.ts";
 
@@ -12,6 +13,7 @@ export type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<voi
 // Optional parts. Each page section is shown only when its source is configured.
 export interface Sources {
   minecraft?: () => ServerStatus[];
+  media?: () => MediaStatus[];
   tailscale?: () => Promise<TailscaleView>;
   // The private admin menu handles every request whose Host is its hostname, and nothing else.
   admin?: { hostname: string; handle: Handler };
@@ -37,6 +39,7 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
       if (req.method === "GET" && url.pathname === "/healthz") {
         const database = await isDatabaseReachable(pool);
         const servers = sources.minecraft?.() ?? [];
+        const media = sources.media?.() ?? [];
         const tailscale = await sources.tailscale?.();
         return sendJson(res, database ? 200 : 503, {
           status: database ? "ok" : "unavailable",
@@ -44,6 +47,9 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
           database: database ? "ok" : "unreachable",
           ...(servers.length > 0 && {
             minecraft: servers.map((status) => ({ name: status.server.name, state: status.state })),
+          }),
+          ...(media.length > 0 && {
+            media: media.map((status) => ({ name: status.service.name, state: status.state })),
           }),
           ...(tailscale && { tailscale: tailscale.state }),
         });
@@ -55,6 +61,7 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
         return res.end(
           renderPage(config.appVersion, releases, {
             minecraft: sources.minecraft?.() ?? [],
+            media: sources.media?.() ?? [],
             tailscale: tailscale ?? null,
             adminUrl: sources.admin ? `https://${sources.admin.hostname}` : "",
             nav: config.nav,
@@ -73,8 +80,10 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
 
 export interface PageSections {
   minecraft?: ServerStatus[];
+  media?: MediaStatus[];
   tailscale?: TailscaleView | null;
-  // When set, each Minecraft card is a link to its page in the admin menu.
+  // When set, Minecraft and media cards link into the admin menu. Media addresses appear
+  // nowhere on this page: the link is the admin hostname, and Access reveals the rest.
   adminUrl?: string;
   nav?: NavConfig;
   now?: Date;
@@ -83,7 +92,7 @@ export interface PageSections {
 export function renderPage(
   currentVersion: string,
   releases: Release[],
-  { minecraft = [], tailscale = null, adminUrl = "", nav, now = new Date() }: PageSections = {},
+  { minecraft = [], media = [], tailscale = null, adminUrl = "", nav, now = new Date() }: PageSections = {},
 ): string {
   const rows = releases
     .map((release) => {
@@ -108,6 +117,13 @@ export function renderPage(
       </div>`
     : "";
 
+  const mediaSection = media.length
+    ? `<h2>Media</h2>
+      <div class="cards">
+        ${media.map((status) => mediaCard(status, now, adminUrl)).join("\n        ")}
+      </div>`
+    : "";
+
   const tailscaleSection = tailscale
     ? `<h2>Remote access</h2>
       <div class="cards">
@@ -118,6 +134,7 @@ export function renderPage(
   const body = `<h1>brftools status</h1>
       <p class="meta">Refreshed every 60 seconds.</p>
       ${minecraftSection}
+      ${mediaSection}
       ${tailscaleSection}
       <h2>Release history</h2>
       <p>Running version ${versionHtml(currentVersion)}. Each row is one start of the app; a rollback appears as an older version starting again.</p>
@@ -160,6 +177,26 @@ function serverCard({ server, state, checkedAt, result }: ServerStatus, now: Dat
           <div class="card-head"><h3>${heading}</h3>${statusPill(tone, label)}</div>
           ${detailList(details)}
           <p class="meta">${checked}</p>
+        </section>`;
+}
+
+// The card is the button. Its only link is the admin hostname: no address, port or target URL
+// for a media service ever appears on this page. Access decides who gets to see those.
+function mediaCard({ service, state, checkedAt, result }: MediaStatus, now: Date, adminUrl: string): string {
+  const tone: Tone = state === "up" ? (result?.setupIncomplete ? "warn" : "ok") : state === "down" ? "bad" : "idle";
+  const label =
+    state === "unknown" ? "Checking…" : state === "down" ? "Down" : result?.setupIncomplete ? "Setup not complete" : "Up";
+  const heading = adminUrl
+    ? `<a class="cover" href="${escapeHtml(`${adminUrl}/open/${service.id}`)}">${escapeHtml(service.name)}</a>`
+    : escapeHtml(service.name);
+
+  const details: [string, string][] = [];
+  if (state === "up" && result?.version) details.push(["Version", escapeHtml(result.version)]);
+
+  return `<section class="card">
+          <div class="card-head"><h3>${heading}</h3>${statusPill(tone, label)}</div>
+          ${detailList(details)}
+          <p class="meta">${checkedAt ? `Checked ${ago(checkedAt, now)} ago` : "Not checked yet"}</p>
         </section>`;
 }
 

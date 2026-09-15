@@ -17,6 +17,7 @@ import {
   type NavLinks,
   type Tone,
 } from "./html.ts";
+import type { MediaServiceConfig, MediaStatus } from "./media.ts";
 import type { MinecraftServerConfig, ServerStatus } from "./minecraft.ts";
 
 // The private Minecraft admin menu, served only on the admin hostname and only to requests that
@@ -150,6 +151,9 @@ export interface AdminOptions {
   verifier: AccessVerifier;
   servers: MinecraftServerConfig[];
   minecraft: () => ServerStatus[];
+  // The media services and their latest state. Their addresses are shown only here.
+  mediaServices?: MediaServiceConfig[];
+  media?: () => MediaStatus[];
   inboxDir: string;
   stateDir: string;
   // Header and footer links; statusUrl is the public status page.
@@ -159,6 +163,8 @@ export interface AdminOptions {
 
 export function createAdminHandler(options: AdminOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const { hostname, verifier, servers, inboxDir, stateDir } = options;
+  const mediaServices = options.mediaServices ?? [];
+  const mediaStatuses = options.media ?? (() => []);
   const now = options.now ?? (() => new Date());
   const origin = `https://${hostname}`;
   const nav: NavLinks = {
@@ -238,7 +244,8 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
       ${current ? `<p>An action is in progress: <a href="/actions/${current}">view its progress</a>.</p>` : ""}
       <div class="cards">
         ${cards.join("\n        ")}
-      </div>`;
+      </div>
+      ${mediaServices.length ? `<div class="actions"><a class="btn" href="/media">Media services</a></div>` : ""}`;
     return adminPage("Servers", body, 30);
   }
 
@@ -401,6 +408,35 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
     res.end();
   }
 
+  // The only page that shows a media service's address: it is behind Access and the token check.
+  function mediaPage(email: string): string {
+    const statuses = mediaStatuses();
+    const t = now();
+    const cards = mediaServices.map((service) => {
+      const status = statuses.find((candidate) => candidate.service.id === service.id);
+      const state = mediaStateOf(status);
+      const details: [string, string][] = [];
+      if (status?.state === "up" && status.result?.version) details.push(["Version", escapeHtml(status.result.version)]);
+      details.push(["Tailscale", `<a href="${escapeHtml(service.url)}">${escapeHtml(shortUrl(service.url))}</a>`]);
+      if (service.lanUrl) {
+        details.push(["Home network", `<a href="${escapeHtml(service.lanUrl)}">${escapeHtml(shortUrl(service.lanUrl))}</a>`]);
+      }
+      return `<section class="card">
+          <div class="card-head"><h3><a class="cover" href="${escapeHtml(service.url)}">${escapeHtml(service.name)}</a></h3>${statusPill(state.tone, state.label)}</div>
+          ${detailList(details)}
+          <p class="meta">${status?.checkedAt ? `Checked ${ago(status.checkedAt, t)} ago` : "Not checked yet"}</p>
+        </section>`;
+    });
+    const body = `${breadcrumbs([{ label: "Status", href: nav.status }, { label: "Media" }])}
+      <h1>Media services</h1>
+      <p class="meta">Signed in as ${escapeHtml(email)}. Tailscale links work anywhere with Tailscale on; home-network links only at home.</p>
+      <div class="cards">
+        ${cards.join("\n        ")}
+      </div>
+      <div class="actions"><a class="btn" href="/">Minecraft admin</a></div>`;
+    return adminPage("Media services", body, 30);
+  }
+
   function messagePage(title: string, html: string, tone: Tone = "bad"): string {
     const body = `${breadcrumbs(crumbRoot())}
       <p class="state ${tone}">${glyph(tone)}</p>
@@ -441,6 +477,20 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
       if (req.method === "GET" && section === "actions" && name && REQUEST_ID.test(name) && sub === undefined) {
         return sendHtml(res, 200, await progressPage(name));
       }
+      if (req.method === "GET" && section === "media" && name === undefined && mediaServices.length > 0) {
+        return sendHtml(res, 200, mediaPage(email));
+      }
+      // The id is a key into the configured services, never a URL: this cannot be made to
+      // redirect anywhere else.
+      if (req.method === "GET" && section === "open" && name && sub === undefined) {
+        const service = mediaServices.find((candidate) => candidate.id === name);
+        if (service) {
+          console.log(`admin: ${JSON.stringify(email)} opened ${service.id}`);
+          res.writeHead(302, { location: service.url, "cache-control": "no-store" });
+          res.end();
+          return;
+        }
+      }
     }
     return sendHtml(res, 404, messagePage("Not found", `<a class="btn" href="/">All servers</a>`));
   };
@@ -474,6 +524,18 @@ const FINISHED: Record<string, { label: string; tone: Tone }> = {
 };
 
 const OUTCOMES: Record<string, string> = { done: "Done", failed: "Failed", rejected: "Refused", running: "In progress" };
+
+function mediaStateOf(status: MediaStatus | undefined): { label: string; tone: Tone } {
+  if (!status || status.state === "unknown") return { label: "Checking…", tone: "idle" };
+  if (status.state === "down") return { label: "Down", tone: "bad" };
+  return status.result?.setupIncomplete ? { label: "Setup not complete", tone: "warn" } : { label: "Up", tone: "ok" };
+}
+
+// Host and port are what identify a service here; the scheme and path are noise.
+function shortUrl(url: string): string {
+  const parsed = URL.parse(url);
+  return parsed ? parsed.host : url;
+}
 
 function stateOf(snapshot: ServerSnapshot | null): { label: string; tone: Tone } {
   if (!snapshot) return { label: "No data from the host", tone: "bad" };

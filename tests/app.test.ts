@@ -6,6 +6,7 @@ import { createApp, renderPage } from "../src/app.ts";
 import { loadConfig } from "../src/config.ts";
 import { createPool, listReleases, migrate, recordRelease, type Pool } from "../src/db.ts";
 import type { MinecraftServerConfig, ServerStatus } from "../src/minecraft.ts";
+import type { MediaStatus } from "../src/media.ts";
 import type { TailscaleSnapshot, TailscaleView } from "../src/tailscale.ts";
 import { listenOn, send } from "./http-helper.ts";
 
@@ -109,6 +110,61 @@ describe("renderPage", () => {
     assert.match(html, /<h3>&lt;img src=x onerror=alert\(1\)&gt;<\/h3>/);
     assert.doesNotMatch(html, /<img|<script>/);
     assert.match(html, /Not checked yet/);
+  });
+});
+
+describe("renderPage: media", () => {
+  const now = new Date("2026-09-15T12:00:30Z");
+  const plex: MediaStatus = {
+    service: {
+      id: "plex",
+      name: "Plex",
+      kind: "plex",
+      checkUrl: "http://plex.example:32400/identity",
+      url: "http://tailnet.example:32400/web",
+      lanUrl: "http://home.example:32400/web",
+    },
+    state: "up",
+    checkedAt: new Date("2026-09-15T12:00:18Z"),
+    result: { version: "1.43.4.10903", setupIncomplete: false },
+  };
+  const books: MediaStatus = {
+    service: { id: "books", name: "Audiobookshelf", kind: "audiobookshelf", checkUrl: "http://books.example/status", url: "http://books.example/", lanUrl: "" },
+    state: "up",
+    checkedAt: now,
+    result: { version: "2.36.0", setupIncomplete: true },
+  };
+  const sonarr: MediaStatus = {
+    service: { id: "sonarr", name: "Sonarr", kind: "arr", checkUrl: "http://sonarr.example:8989/ping", url: "http://sonarr.example:8989", lanUrl: "" },
+    state: "down",
+    checkedAt: now,
+    result: null,
+  };
+
+  test("omits the section when nothing is configured", () => {
+    assert.doesNotMatch(renderPage("dev", []), /<h2>Media<\/h2>/);
+  });
+
+  test("shows state and version, and never an address", () => {
+    const html = renderPage("dev", [], { media: [plex, books, sonarr], adminUrl: "https://admin.example.com", now });
+    assert.match(html, /<h2>Media<\/h2>/);
+    assert.match(html, /<h3><a class="cover" href="https:\/\/admin.example.com\/open\/plex">Plex<\/a><\/h3>/);
+    assert.match(html, /<span class="state ok">(<svg[^>]*>.*?<\/svg>)?Up<\/span>/);
+    assert.match(html, /<dt>Version<\/dt><dd>1.43.4.10903<\/dd>/);
+    assert.match(html, /<span class="state warn">(<svg[^>]*>.*?<\/svg>)?Setup not complete<\/span>/);
+    assert.match(html, /<span class="state bad">(<svg[^>]*>.*?<\/svg>)?Down<\/span>/);
+    assert.match(html, /Checked 12 s ago/);
+
+    // The point of the section: the public page carries no media address of any kind.
+    for (const secret of ["plex.example", "tailnet.example", "home.example", "sonarr.example", "32400", "8989", "books.example", "/identity", "/ping"]) {
+      assert.doesNotMatch(html, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), `leaked ${secret}`);
+    }
+  });
+
+  test("without an admin menu, the cards are plain text", () => {
+    const html = renderPage("dev", [], { media: [plex], now });
+    assert.doesNotMatch(html, /class="cover"/);
+    assert.doesNotMatch(html, /32400/);
   });
 });
 

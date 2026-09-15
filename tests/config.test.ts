@@ -79,6 +79,46 @@ test("invalid Minecraft configuration fails at startup", () => {
   );
 });
 
+const media = {
+  MEDIA_1_ID: "plex",
+  MEDIA_1_NAME: "Plex",
+  MEDIA_1_KIND: "plex",
+  MEDIA_1_CHECK: "http://plex.example:32400/identity",
+  MEDIA_1_URL: "http://tailnet.example:32400/web",
+  MEDIA_1_LAN_URL: "http://lan.example:32400/web",
+};
+
+test("media services are optional, and read from numbered variables", () => {
+  assert.deepEqual(loadConfig(required).mediaServices, []);
+  assert.deepEqual(loadConfig({ ...required, ...media }).mediaServices, [
+    {
+      id: "plex",
+      name: "Plex",
+      kind: "plex",
+      checkUrl: "http://plex.example:32400/identity",
+      url: "http://tailnet.example:32400/web",
+      lanUrl: "http://lan.example:32400/web",
+    },
+  ]);
+});
+
+test("invalid media configuration fails at startup", () => {
+  assert.throws(() => loadConfig({ ...required, MEDIA_1_NAME: "Plex" }), /MEDIA_1_CHECK must be set when other/);
+  for (const missing of ["MEDIA_1_ID", "MEDIA_1_NAME", "MEDIA_1_KIND", "MEDIA_1_URL"]) {
+    const partial: Record<string, string> = { ...required, ...media };
+    delete partial[missing];
+    assert.throws(() => loadConfig(partial), new RegExp(`${missing} must be set`));
+  }
+  assert.throws(() => loadConfig({ ...required, ...media, MEDIA_1_KIND: "docker" }), /MEDIA_1_KIND must be one of/);
+  assert.throws(() => loadConfig({ ...required, ...media, MEDIA_1_ID: "Plex Server" }), /MEDIA_1_ID must be/);
+  assert.throws(() => loadConfig({ ...required, ...media, MEDIA_1_URL: "javascript:alert(1)" }), /MEDIA_1_URL must be an http/);
+  assert.throws(() => loadConfig({ ...required, ...media, MEDIA_1_CHECK: "file:///etc/passwd" }), /MEDIA_1_CHECK must be an http/);
+  assert.throws(
+    () => loadConfig({ ...required, ...media, MEDIA_2_ID: "plex", MEDIA_2_NAME: "Other", MEDIA_2_KIND: "arr", MEDIA_2_CHECK: "http://a.example/ping", MEDIA_2_URL: "http://a.example/" }),
+    /MEDIA_2_ID "plex" is already used/,
+  );
+});
+
 test("TAILSCALE_STATUS_FILE is optional and must be an absolute path", () => {
   assert.equal(loadConfig(required).tailscaleStatusFile, "");
   assert.equal(

@@ -1,5 +1,6 @@
 // All configuration is read and validated here, once, at startup.
 
+import { MEDIA_KINDS, type MediaKind, type MediaServiceConfig } from "./media.ts";
 import type { MinecraftServerConfig } from "./minecraft.ts";
 
 export interface AdminConfig {
@@ -22,12 +23,15 @@ export interface Config {
   appVersion: string;
   databaseUrl: string;
   minecraftServers: MinecraftServerConfig[];
+  mediaServices: MediaServiceConfig[];
   tailscaleStatusFile: string;
   admin: AdminConfig | null;
   nav: NavConfig;
 }
 
 const MAX_MINECRAFT_SERVERS = 4;
+const MAX_MEDIA_SERVICES = 8;
+const SLUG = /^[a-z0-9-]{1,32}$/;
 const HOSTNAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 const ADMIN_VARIABLES = ["ADMIN_HOSTNAME", "ACCESS_TEAM_DOMAIN", "ACCESS_AUD", "MC_ACTIONS_INBOX_DIR", "MC_ACTIONS_STATE_DIR"] as const;
 
@@ -57,10 +61,55 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     appVersion: env.APP_VERSION || "dev",
     databaseUrl,
     minecraftServers,
+    mediaServices: loadMediaServices(env),
     tailscaleStatusFile,
     admin: loadAdmin(env, minecraftServers),
     nav: loadNav(env),
   };
+}
+
+// Numbered MEDIA_1_* to MEDIA_8_*. A service exists when its MEDIA_n_CHECK is set.
+function loadMediaServices(env: NodeJS.ProcessEnv): MediaServiceConfig[] {
+  const services: MediaServiceConfig[] = [];
+  for (let n = 1; n <= MAX_MEDIA_SERVICES; n++) {
+    const prefix = `MEDIA_${n}_`;
+    const checkUrl = env[`${prefix}CHECK`] || "";
+    const id = env[`${prefix}ID`] || "";
+    const name = env[`${prefix}NAME`] || "";
+    const kind = env[`${prefix}KIND`] || "";
+    const url = env[`${prefix}URL`] || "";
+    const lanUrl = env[`${prefix}LAN_URL`] || "";
+
+    if (!checkUrl) {
+      if (id || name || kind || url || lanUrl) throw new Error(`${prefix}CHECK must be set when other ${prefix}* variables are`);
+      continue;
+    }
+    for (const [suffix, value] of [
+      ["ID", id],
+      ["NAME", name],
+      ["KIND", kind],
+      ["URL", url],
+    ] as const) {
+      if (!value) throw new Error(`${prefix}${suffix} must be set when ${prefix}CHECK is`);
+    }
+    if (!SLUG.test(id)) throw new Error(`${prefix}ID must be 1-32 lower-case letters, digits or hyphens, got "${id}"`);
+    if (services.some((service) => service.id === id)) throw new Error(`${prefix}ID "${id}" is already used by another service`);
+    if (!MEDIA_KINDS.includes(kind as MediaKind)) {
+      throw new Error(`${prefix}KIND must be one of ${MEDIA_KINDS.join(", ")}, got "${kind}"`);
+    }
+    for (const [suffix, value] of [
+      ["CHECK", checkUrl],
+      ["URL", url],
+      ["LAN_URL", lanUrl],
+    ] as const) {
+      if (value && !/^https?:$/.test(URL.parse(value)?.protocol ?? "")) {
+        throw new Error(`${prefix}${suffix} must be an http or https URL, got "${value}"`);
+      }
+    }
+
+    services.push({ id, name, kind: kind as MediaKind, checkUrl, url, lanUrl });
+  }
+  return services;
 }
 
 // Absolute URLs for the header and footer. Unset links are simply left out; the Status link

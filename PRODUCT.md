@@ -19,6 +19,7 @@ P410 Docker. It needs a server process and PostgreSQL. It reads files written by
   - Start times and commit SHAs, which are already public in this repository.
   - For each Minecraft server: name, state, version, player counts, a join address and a map link.
   - The host's Tailscale state, relay, health warnings, and the names, OS and online state of the other devices on the tailnet.
+  - For each media service: its name, whether it is up, and its version where that is free. **No address, port or link target.**
   - Minecraft player names are never shown. Tailscale device names are shown by the owner's decision; IP addresses and tailnet names are not.
 - **Admin hostname:** private. It sits behind a Cloudflare Access application, and the app verifies the Access token on every request, so a request that reaches the app any other way gets nothing. It shows player names and a recent server log with IP addresses removed.
 - Which addresses and hostnames are used is production configuration, not part of this repository.
@@ -42,11 +43,13 @@ P410 Docker. It needs a server process and PostgreSQL. It reads files written by
 7. `GET /` shows the host's Tailscale state from a summary at most 3 minutes old — connected, connected with warnings (listed), or the reason it is not — and says so when the summary is stale or missing.
 8. No admin page or action is reachable without a valid Access token for the admin application, by any route.
 9. From the admin menu, the owner can save, restart, stop and start each Minecraft server, and see progress until the server is healthy or the action has failed. Players online are warned before a restart or stop.
+10. `GET /` shows each configured media service as up or down, refreshed at least every minute, using no credential and revealing no address. A card leads to the service only through Access.
 
 ## Out of scope
 
 - Accepting input or forms on the public hostname
-- Reporting on other apps or services, other than the read-only Minecraft status query and the host's Tailscale summary
+- Reporting on other apps or services, other than the read-only Minecraft status query, the host's Tailscale summary, and credential-free health checks of the media services
+- Holding an API key or login for any service it reports on, or acting on one (starting, stopping or queueing)
 - Minecraft player names on the public page, player positions, or anything that needs a Minecraft credential such as RCON
 - A console or free-text commands of any kind; Docker access; any access to `tailscaled` or the Tailscale API
 - Writing to any database other than its own
