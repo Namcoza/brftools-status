@@ -80,7 +80,7 @@ Constraints that shape it: system fonts, inline CSS and inline SVG only (the adm
 | `MC_n_JOIN` | Free text shown as the address to join | none |
 | `MC_n_MAP_URL` | `http`/`https` link to that server's web map | none |
 | `TAILSCALE_STATUS_FILE` | Absolute path, inside the container, of the Tailscale summary written by the host. Unset hides the section | none |
-| `MEDIA_n_CHECK` | Credential-free health URL for a media service, reachable from the container. `n` is 1–8; a service exists only when this is set | none |
+| `MEDIA_n_CHECK` | Credential-free health URL for a media service, reachable from the container. `n` is 1–12; a service exists only when this is set | none |
 | `MEDIA_n_ID` | Slug used by the admin menu's `/open/<id>` | required with `MEDIA_n_CHECK` |
 | `MEDIA_n_NAME` | Name shown publicly | required with `MEDIA_n_CHECK` |
 | `MEDIA_n_KIND` | `plex`, `arr`, `sabnzbd`, `audiobookshelf`, or `http` for anything else — chooses how the response is read | required with `MEDIA_n_CHECK` |
