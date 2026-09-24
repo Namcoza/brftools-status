@@ -102,6 +102,25 @@ test("media services are optional, and read from numbered variables", () => {
   ]);
 });
 
+test("media services are read up to the limit, and higher numbers are ignored", () => {
+  const last = {
+    MEDIA_12_ID: "navidrome",
+    MEDIA_12_NAME: "Navidrome",
+    MEDIA_12_KIND: "http",
+    MEDIA_12_CHECK: "http://navidrome.example:4533/",
+    MEDIA_12_URL: "http://tailnet.example:4533/",
+  };
+  const beyondLimit = {
+    MEDIA_13_ID: "beyond",
+    MEDIA_13_NAME: "Beyond",
+    MEDIA_13_KIND: "http",
+    MEDIA_13_CHECK: "http://beyond.example/",
+    MEDIA_13_URL: "http://beyond.example/",
+  };
+  const services = loadConfig({ ...required, ...media, ...last, ...beyondLimit }).mediaServices;
+  assert.deepEqual(services.map((service) => service.id), ["plex", "navidrome"]);
+});
+
 test("invalid media configuration fails at startup", () => {
   assert.throws(() => loadConfig({ ...required, MEDIA_1_NAME: "Plex" }), /MEDIA_1_CHECK must be set when other/);
   for (const missing of ["MEDIA_1_ID", "MEDIA_1_NAME", "MEDIA_1_KIND", "MEDIA_1_URL"]) {

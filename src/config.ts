@@ -30,7 +30,7 @@ export interface Config {
 }
 
 const MAX_MINECRAFT_SERVERS = 4;
-const MAX_MEDIA_SERVICES = 8;
+const MAX_MEDIA_SERVICES = 12;
 const SLUG = /^[a-z0-9-]{1,32}$/;
 const HOSTNAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 const ADMIN_VARIABLES = ["ADMIN_HOSTNAME", "ACCESS_TEAM_DOMAIN", "ACCESS_AUD", "MC_ACTIONS_INBOX_DIR", "MC_ACTIONS_STATE_DIR"] as const;
@@ -68,7 +68,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   };
 }
 
-// Numbered MEDIA_1_* to MEDIA_8_*. A service exists when its MEDIA_n_CHECK is set.
+// Numbered MEDIA_1_* to MEDIA_12_*. A service exists when its MEDIA_n_CHECK is set.
 function loadMediaServices(env: NodeJS.ProcessEnv): MediaServiceConfig[] {
   const services: MediaServiceConfig[] = [];
   for (let n = 1; n <= MAX_MEDIA_SERVICES; n++) {
