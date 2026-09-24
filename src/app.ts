@@ -1,12 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { Config, NavConfig } from "./config.ts";
-import { isDatabaseReachable, listReleases, type Pool, type Release } from "./db.ts";
-import { ago, detailList, escapeHtml, FAVICON_SVG, page, statusPill, type NavLinks, type Tone } from "./html.ts";
+import type { Config } from "./config.ts";
+import { isDatabaseReachable, listReleases, type Pool } from "./db.ts";
+import { FAVICON_SVG } from "./html.ts";
+import { parseSection, renderHome, type HomeData, type MediaFilter, type MediaView } from "./home.ts";
 import type { MediaStatus } from "./media.ts";
 import type { ServerStatus } from "./minecraft.ts";
 import type { TailscaleView } from "./tailscale.ts";
-
-const COMMIT_URL = "https://github.com/Namcoza/brftools-status/commit/";
 
 export type Handler = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 
@@ -18,6 +17,8 @@ export interface Sources {
   // The private admin menu handles every request whose Host is its hostname, and nothing else.
   admin?: { hostname: string; handle: Handler };
 }
+
+const MEDIA_GROUPS: MediaFilter[] = ["play", "lib", "fetch"];
 
 export function createApp(config: Config, pool: Pool, sources: Sources = {}): Server {
   return createServer(async (req, res) => {
@@ -55,18 +56,29 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
         });
       }
 
-      if (req.method === "GET" && url.pathname === "/") {
+      const section = req.method === "GET" ? parseSection(url.pathname) : null;
+      if (section) {
         const [releases, tailscale] = await Promise.all([listReleases(pool), sources.tailscale?.()]);
+        const group = url.searchParams.get("group") ?? "all";
+        const mediaFilter: MediaFilter = MEDIA_GROUPS.includes(group as MediaFilter) ? (group as MediaFilter) : "all";
+        const mediaView: MediaView = url.searchParams.get("view") === "table" ? "table" : "cards";
+
+        const data: HomeData = {
+          section,
+          currentVersion: config.appVersion,
+          minecraft: sources.minecraft?.() ?? [],
+          media: sources.media?.() ?? [],
+          tailscale: tailscale ?? null,
+          releases,
+          facts: config.homeFacts,
+          adminUrl: sources.admin ? `https://${sources.admin.hostname}` : "",
+          nav: config.nav,
+          now: new Date(),
+          mediaFilter,
+          mediaView,
+        };
         res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-        return res.end(
-          renderPage(config.appVersion, releases, {
-            minecraft: sources.minecraft?.() ?? [],
-            media: sources.media?.() ?? [],
-            tailscale: tailscale ?? null,
-            adminUrl: sources.admin ? `https://${sources.admin.hostname}` : "",
-            nav: config.nav,
-          }),
-        );
+        return res.end(renderHome(data));
       }
 
       return sendJson(res, 404, { error: "not found" });
@@ -76,194 +88,6 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
       return sendJson(res, 500, { error: "internal error" });
     }
   });
-}
-
-export interface PageSections {
-  minecraft?: ServerStatus[];
-  media?: MediaStatus[];
-  tailscale?: TailscaleView | null;
-  // When set, Minecraft and media cards link into the admin menu. Media addresses appear
-  // nowhere on this page: the link is the admin hostname, and Access reveals the rest.
-  adminUrl?: string;
-  nav?: NavConfig;
-  now?: Date;
-}
-
-export function renderPage(
-  currentVersion: string,
-  releases: Release[],
-  { minecraft = [], media = [], tailscale = null, adminUrl = "", nav, now = new Date() }: PageSections = {},
-): string {
-  const rows = releases
-    .map((release) => {
-      const current = release.version === currentVersion ? ' class="current"' : "";
-      return `<tr${current}><td>${escapeHtml(release.startedAt.toISOString().slice(0, 16).replace("T", " "))}</td><td>${versionHtml(release.version)}</td></tr>`;
-    })
-    .join("\n          ");
-
-  const table = releases.length
-    ? `<table class="table">
-        <thead><tr><th>Started (UTC)</th><th>Version</th></tr></thead>
-        <tbody>
-          ${rows}
-        </tbody>
-      </table>`
-    : "<p>No releases recorded yet.</p>";
-
-  const minecraftSection = minecraft.length
-    ? `<h2>Minecraft</h2>
-      <div class="cards">
-        ${minecraft.map((status) => serverCard(status, now, adminUrl)).join("\n        ")}
-      </div>`
-    : "";
-
-  const mediaSection = media.length
-    ? `<h2>Media</h2>
-      <div class="cards">
-        ${media.map((status) => mediaCard(status, now, adminUrl)).join("\n        ")}
-      </div>`
-    : "";
-
-  const tailscaleSection = tailscale
-    ? `<h2>Remote access</h2>
-      <div class="cards">
-        ${tailscaleCard(tailscale, now)}
-      </div>`
-    : "";
-
-  const body = `<h1>brftools status</h1>
-      <p class="meta">Refreshed every 60 seconds.</p>
-      ${minecraftSection}
-      ${mediaSection}
-      ${tailscaleSection}
-      <h2>Release history</h2>
-      <p>Running version ${versionHtml(currentVersion)}. Each row is one start of the app; a rollback appears as an older version starting again.</p>
-      ${table}`;
-
-  return page({
-    title: "brftools status",
-    body,
-    refreshSeconds: 60,
-    nav: navLinks(nav),
-    faviconUrl: "/favicon.svg",
-  });
-}
-
-function navLinks(nav?: NavConfig): NavLinks {
-  return { status: nav?.statusUrl || "/", games: nav?.gamesUrl ?? "", map: nav?.mapUrl ?? "" };
-}
-
-// Player counts only: names are deliberately never shown on this public page.
-function serverCard({ server, state, checkedAt, result }: ServerStatus, now: Date, adminUrl: string): string {
-  const title = (state === "online" && result?.motd) || server.name;
-  const tone: Tone = state === "online" ? "ok" : state === "offline" ? "bad" : "idle";
-  const label = { unknown: "Checking…", online: "Online", offline: "Offline" }[state];
-  const heading =
-    adminUrl && server.id
-      ? `<a class="cover" href="${escapeHtml(`${adminUrl}/servers/${server.id}`)}">${escapeHtml(title)}</a>`
-      : escapeHtml(title);
-
-  const details: [string, string][] = [];
-  if (state === "online" && result) {
-    details.push(["Players", `${result.playersOnline} / ${result.playersMax}`]);
-    if (result.version) details.push(["Version", escapeHtml(result.version)]);
-  }
-  if (server.join) details.push(["Join", escapeHtml(server.join)]);
-  if (server.mapUrl) details.push(["Map", `<a href="${escapeHtml(server.mapUrl)}">Open the map</a>`]);
-
-  const checked = checkedAt ? `Checked ${ago(checkedAt, now)} ago` : "Not checked yet";
-
-  return `<section class="card">
-          <div class="card-head"><h3>${heading}</h3>${statusPill(tone, label)}</div>
-          ${detailList(details)}
-          <p class="meta">${checked}</p>
-        </section>`;
-}
-
-// The card is the button. Its only link is the admin hostname: no address, port or target URL
-// for a media service ever appears on this page. Access decides who gets to see those.
-function mediaCard({ service, state, checkedAt, result }: MediaStatus, now: Date, adminUrl: string): string {
-  const tone: Tone = state === "up" ? (result?.setupIncomplete ? "warn" : "ok") : state === "down" ? "bad" : "idle";
-  const label =
-    state === "unknown" ? "Checking…" : state === "down" ? "Down" : result?.setupIncomplete ? "Setup not complete" : "Up";
-  const heading = adminUrl
-    ? `<a class="cover" href="${escapeHtml(`${adminUrl}/open/${service.id}`)}">${escapeHtml(service.name)}</a>`
-    : escapeHtml(service.name);
-
-  const details: [string, string][] = [];
-  if (state === "up" && result?.version) details.push(["Version", escapeHtml(result.version)]);
-
-  return `<section class="card">
-          <div class="card-head"><h3>${heading}</h3>${statusPill(tone, label)}</div>
-          ${detailList(details)}
-          <p class="meta">${checkedAt ? `Checked ${ago(checkedAt, now)} ago` : "Not checked yet"}</p>
-        </section>`;
-}
-
-const BACKEND_STATES: Record<string, string> = {
-  NoState: "Not running",
-  Starting: "Starting",
-  NeedsLogin: "Needs login",
-  NeedsMachineAuth: "Needs approval in the admin console",
-  Stopped: "Stopped",
-  Unavailable: "Not responding",
-};
-
-// Device names are shown by decision. Addresses and tailnet names never reach the snapshot.
-function tailscaleCard({ state, snapshot }: TailscaleView, now: Date): string {
-  const backendState = snapshot?.backendState ?? "";
-  const label =
-    state === "connected"
-      ? "Connected"
-      : state === "degraded"
-        ? "Connected, with warnings"
-        : state === "stale"
-          ? "No recent update"
-          : state === "missing"
-            ? "No data"
-            : backendState === "Running"
-              ? "Not connected to Tailscale"
-              : (BACKEND_STATES[backendState] ?? (backendState || "Down"));
-  const tone: Tone = state === "connected" ? "ok" : state === "degraded" || state === "stale" ? "warn" : "bad";
-
-  const details: [string, string][] = [];
-  if (snapshot?.relay) details.push(["Relay", escapeHtml(snapshot.relay.toUpperCase())]);
-  for (const warning of snapshot?.health ?? []) details.push(["Warning", escapeHtml(warning)]);
-  if (snapshot?.error) details.push(["Error", escapeHtml(snapshot.error)]);
-
-  // Folded to a count by default, so a phone shows the state first.
-  const peers = snapshot?.peers ?? [];
-  const online = peers.filter((peer) => peer.online).length;
-  const devices = peers.length
-    ? `<details class="above">
-            <summary>${peers.length} ${peers.length === 1 ? "device" : "devices"} · ${online} online</summary>
-            <ul class="devices">${peers
-              .map((peer) => {
-                const presence = peer.online
-                  ? "online"
-                  : `offline${peer.lastSeen ? `, last seen ${ago(peer.lastSeen, now)} ago` : ""}`;
-                const about = [peer.os, presence].filter(Boolean).map(escapeHtml).join(" · ");
-                return `<li><span>${escapeHtml(peer.name)}</span><span class="who">${about}</span></li>`;
-              })
-              .join("")}</ul>
-          </details>`
-    : "";
-
-  const updated = snapshot ? `Updated ${ago(snapshot.generatedAt, now)} ago` : "Status file missing or unreadable";
-
-  return `<section class="card">
-          <div class="card-head"><h3>This server</h3>${statusPill(tone, label)}</div>
-          ${detailList(details)}
-          ${devices}
-          <p class="meta">${updated}</p>
-        </section>`;
-}
-
-// A full commit SHA links to that commit; anything else (such as "dev") is plain text.
-function versionHtml(version: string): string {
-  const shortened = /^[0-9a-f]{40}$/.test(version) ? version.slice(0, 7) : version;
-  const code = `<code>${escapeHtml(shortened)}</code>`;
-  return /^[0-9a-f]{40}$/.test(version) ? `<a href="${COMMIT_URL}${version}">${code}</a>` : code;
 }
 
 function hostOf(req: IncomingMessage): string {

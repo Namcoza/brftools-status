@@ -18,6 +18,47 @@ export interface NavConfig {
   mapUrl: string;
 }
 
+// Decorative, non-monitored facts for the Overview and Media tabs: drive usage, hardware
+// labels, open issues and the "who can reach what" table. Nothing here is read by a monitor,
+// and none of it belongs in this public repository (see AGENTS.md, "This repository is
+// public") — it comes from one JSON blob in production config instead. Unset hides it all.
+export interface DriveUsage {
+  usedTb: number;
+  totalTb: number;
+}
+
+export interface HardwareFact {
+  label: string;
+  value: string;
+  detail: string;
+}
+
+export interface HomeIssue {
+  tag: "fix" | "waiting" | "note";
+  title: string;
+  body: string;
+}
+
+export interface ReachRow {
+  name: string;
+  home: string;
+  tail: string;
+  any: string;
+  anyOk: boolean;
+  note: string;
+}
+
+export interface HomeFacts {
+  drive: DriveUsage | null;
+  hardware: HardwareFact[];
+  issues: HomeIssue[];
+  reach: ReachRow[];
+}
+
+const EMPTY_HOME_FACTS: HomeFacts = { drive: null, hardware: [], issues: [], reach: [] };
+const MAX_LIST_ITEMS = 8;
+const ISSUE_TAGS = ["fix", "waiting", "note"] as const;
+
 export interface Config {
   port: number;
   appVersion: string;
@@ -27,6 +68,7 @@ export interface Config {
   tailscaleStatusFile: string;
   admin: AdminConfig | null;
   nav: NavConfig;
+  homeFacts: HomeFacts;
 }
 
 const MAX_MINECRAFT_SERVERS = 4;
@@ -65,7 +107,82 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     tailscaleStatusFile,
     admin: loadAdmin(env, minecraftServers),
     nav: loadNav(env),
+    homeFacts: loadHomeFacts(env),
   };
+}
+
+// One JSON object, so the shape can grow without a wall of numbered variables for content
+// that drives no behaviour. Absent or empty means the sections it feeds are hidden.
+function loadHomeFacts(env: NodeJS.ProcessEnv): HomeFacts {
+  const raw = env.HOME_FACTS_JSON || "";
+  if (!raw) return EMPTY_HOME_FACTS;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("HOME_FACTS_JSON must be valid JSON");
+  }
+  if (typeof parsed !== "object" || parsed === null) throw new Error("HOME_FACTS_JSON must be a JSON object");
+  const value = parsed as Record<string, unknown>;
+
+  const drive = value.drive;
+  let driveUsage: DriveUsage | null = null;
+  if (drive !== undefined && drive !== null) {
+    const { usedTb, totalTb } = (drive ?? {}) as Record<string, unknown>;
+    if (typeof usedTb !== "number" || typeof totalTb !== "number" || !(usedTb >= 0) || !(totalTb > 0)) {
+      throw new Error("HOME_FACTS_JSON.drive needs numeric usedTb and totalTb, with totalTb > 0");
+    }
+    driveUsage = { usedTb, totalTb };
+  }
+
+  const hardware = list(value.hardware, "hardware").map((item, i) => ({
+    label: str(item, "label", `hardware[${i}]`),
+    value: str(item, "value", `hardware[${i}]`),
+    detail: str(item, "detail", `hardware[${i}]`, true),
+  }));
+
+  const issues = list(value.issues, "issues").map((item, i) => {
+    const tag = str(item, "tag", `issues[${i}]`);
+    if (!ISSUE_TAGS.includes(tag as (typeof ISSUE_TAGS)[number])) {
+      throw new Error(`HOME_FACTS_JSON.issues[${i}].tag must be one of ${ISSUE_TAGS.join(", ")}, got "${tag}"`);
+    }
+    return { tag: tag as HomeIssue["tag"], title: str(item, "title", `issues[${i}]`), body: str(item, "body", `issues[${i}]`) };
+  });
+
+  const reach = list(value.reach, "reach").map((item, i) => ({
+    name: str(item, "name", `reach[${i}]`),
+    home: str(item, "home", `reach[${i}]`),
+    tail: str(item, "tail", `reach[${i}]`),
+    any: str(item, "any", `reach[${i}]`),
+    anyOk: bool(item, "anyOk", `reach[${i}]`),
+    note: str(item, "note", `reach[${i}]`, true),
+  }));
+
+  return { drive: driveUsage, hardware, issues, reach };
+}
+
+function list(value: unknown, field: string): Record<string, unknown>[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error(`HOME_FACTS_JSON.${field} must be an array`);
+  if (value.length > MAX_LIST_ITEMS) throw new Error(`HOME_FACTS_JSON.${field} must have at most ${MAX_LIST_ITEMS} items`);
+  return value.map((item, i) => {
+    if (typeof item !== "object" || item === null) throw new Error(`HOME_FACTS_JSON.${field}[${i}] must be an object`);
+    return item as Record<string, unknown>;
+  });
+}
+
+function str(item: Record<string, unknown>, field: string, path: string, optional = false): string {
+  const value = item[field];
+  if (value === undefined && optional) return "";
+  if (typeof value !== "string" || !value) throw new Error(`HOME_FACTS_JSON.${path}.${field} must be a non-empty string`);
+  return value;
+}
+
+function bool(item: Record<string, unknown>, field: string, path: string): boolean {
+  const value = item[field];
+  if (typeof value !== "boolean") throw new Error(`HOME_FACTS_JSON.${path}.${field} must be a boolean`);
+  return value;
 }
 
 // Numbered MEDIA_1_* to MEDIA_12_*. A service exists when its MEDIA_n_CHECK is set.
