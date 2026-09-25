@@ -8,6 +8,7 @@ import { AccessError, type AccessVerifier } from "../src/access.ts";
 import { createAdminHandler } from "../src/admin.ts";
 import type { MediaServiceConfig, MediaStatus } from "../src/media.ts";
 import type { MinecraftServerConfig, ServerStatus } from "../src/minecraft.ts";
+import type { User, UserStore } from "../src/users.ts";
 import { listenOn, send } from "./http-helper.ts";
 
 const hostname = "admin.example.com";
@@ -29,6 +30,8 @@ const mediaStatuses: MediaStatus[] = [
 const verifier: AccessVerifier = {
   async verify(token) {
     if (token === "valid-token") return { email: "owner@example.com" };
+    // A real Access login, but not the owner's: what a too-wide Access policy would let through.
+    if (token === "friend-token") return { email: "friend@example.com" };
     throw new AccessError(token ? "bad token signature" : "no Access token");
   },
 };
@@ -41,6 +44,24 @@ let state = "";
 let server: Server;
 let port = 0;
 let statuses: ServerStatus[] = [];
+let invited: User[] = [];
+
+// In memory; the PostgreSQL store is tested in app.test.ts.
+const users: UserStore = {
+  async list() {
+    return [...invited];
+  },
+  async add(email) {
+    if (invited.some((user) => user.email === email)) return false;
+    invited.unshift({ email, addedAt: new Date(), firstSeenAt: null, lastSeenAt: null });
+    return true;
+  },
+  async remove(email) {
+    const before = invited.length;
+    invited = invited.filter((user) => user.email !== email);
+    return invited.length < before;
+  },
+};
 
 async function writeSnapshot(id: string, fields: Record<string, unknown> = {}): Promise<void> {
   await writeFile(
@@ -77,6 +98,8 @@ before(async () => {
     media: () => mediaStatuses,
     inboxDir: inbox,
     stateDir: state,
+    ownerEmail: "owner@example.com",
+    users,
   });
   server = createServer((req, res) => {
     handle(req, res).catch((error: unknown) => {
@@ -93,6 +116,7 @@ after(async () => {
 });
 
 beforeEach(async () => {
+  invited = [];
   await rm(inbox, { recursive: true, force: true });
   await rm(state, { recursive: true, force: true });
   for (const path of [join(inbox, "new"), join(inbox, "tmp"), join(state, "servers"), join(state, "results")]) {
@@ -126,6 +150,8 @@ describe("admin menu access", () => {
       ["GET", `/actions/${"a".repeat(32)}`],
       ["GET", "/media"],
       ["GET", "/open/plex"],
+      ["GET", "/users"],
+      ["POST", "/users"],
       ["GET", "/no-such-page"],
     ] as const;
     const tokens: Record<string, string>[] = [{}, { "cf-access-jwt-assertion": "forged-token" }];
@@ -335,5 +361,84 @@ describe("admin menu actions", () => {
     for (const path of ["/servers/survival", "/actions/not-an-id", "/servers/family/confirm?action=op", "/healthz", "/servers/family/logs"]) {
       assert.equal((await get(path)).status, 404, path);
     }
+  });
+});
+
+describe("admin menu owner check", () => {
+  test("a valid Access login that is not the owner gets nothing", async () => {
+    const friend = { "cf-access-jwt-assertion": "friend-token", "sec-fetch-site": "same-origin" };
+    for (const [method, path, body] of [
+      ["GET", "/", undefined],
+      ["GET", "/servers/family", undefined],
+      ["POST", "/servers/family/actions", "action=save"],
+      ["GET", "/open/plex", undefined],
+      ["GET", "/users", undefined],
+      ["POST", "/users", "action=add&email=friend%40example.com"],
+    ] as const) {
+      const reply = await send(port, method, path, { headers: friend, body });
+      assert.equal(reply.status, 403, `${method} ${path}`);
+      assert.match(reply.body, /for the owner only/);
+      assert.doesNotMatch(reply.body, /KidOne|lan\.example/);
+    }
+    assert.deepEqual(await queued(), []);
+    assert.deepEqual(invited, []);
+  });
+});
+
+describe("admin menu users page", () => {
+  const form = (fields: Record<string, string>) => new URLSearchParams(fields).toString();
+
+  test("is linked from the overview and starts empty", async () => {
+    assert.match((await get("/")).body, /<a class="btn" href="\/users">Users<\/a>/);
+    const { status, body } = await get("/users");
+    assert.equal(status, 200);
+    assert.match(body, /Nobody has been invited yet/);
+    assert.match(body, /does not require sign-in yet/);
+  });
+
+  test("inviting normalises the email, lists it as invited, and is idempotent", async () => {
+    for (let i = 0; i < 2; i++) {
+      const reply = await post("/users", form({ action: "add", email: "  Friend@Example.com " }));
+      assert.equal(reply.status, 303);
+      assert.equal(reply.headers.location, "/users");
+    }
+    assert.deepEqual(invited.map((user) => user.email), ["friend@example.com"]);
+    const { body } = await get("/users");
+    assert.match(body, /<td>friend@example.com<\/td>/);
+    assert.match(body, /Invited<\/span>/);
+    assert.match(body, /<td>Never<\/td>/);
+  });
+
+  test("someone who has signed in shows as active", async () => {
+    invited = [{ email: "friend@example.com", addedAt: new Date(), firstSeenAt: new Date(), lastSeenAt: new Date() }];
+    assert.match((await get("/users")).body, /Active<\/span>/);
+  });
+
+  test("removing takes them off the list", async () => {
+    await post("/users", form({ action: "add", email: "friend@example.com" }));
+    const reply = await post("/users", form({ action: "remove", email: "friend@example.com" }));
+    assert.equal(reply.status, 303);
+    assert.deepEqual(invited, []);
+  });
+
+  test("bad input is refused and changes nothing", async () => {
+    assert.equal((await post("/users", form({ action: "add", email: "not-an-email" }))).status, 400);
+    assert.equal((await post("/users", form({ action: "promote", email: "friend@example.com" }))).status, 400);
+    assert.equal((await post("/users", form({ action: "add", email: "owner@example.com" }))).status, 400);
+    assert.equal((await post("/users", `email=${"a".repeat(2000)}`)).status, 413);
+    assert.deepEqual(invited, []);
+  });
+
+  test("emails are escaped when shown", async () => {
+    invited = [{ email: "x&y@example.com", addedAt: new Date(), firstSeenAt: null, lastSeenAt: null }];
+    const { body } = await get("/users");
+    assert.match(body, /x&amp;y@example.com/);
+    assert.doesNotMatch(body, /x&y@/);
+  });
+
+  test("refuses posts that did not come from the admin menu", async () => {
+    const reply = await post("/users", form({ action: "add", email: "friend@example.com" }), { ...signedIn, "sec-fetch-site": "cross-site" });
+    assert.equal(reply.status, 403);
+    assert.deepEqual(invited, []);
   });
 });

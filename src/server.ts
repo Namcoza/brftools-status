@@ -6,6 +6,7 @@ import { createPool, migrate, recordRelease } from "./db.ts";
 import { createMediaMonitor } from "./media.ts";
 import { createMonitor } from "./minecraft.ts";
 import { readTailscale } from "./tailscale.ts";
+import { createUserStore } from "./users.ts";
 
 const config = loadConfig();
 const pool = createPool(config.databaseUrl);
@@ -47,11 +48,15 @@ const server = createApp(config, pool, {
           inboxDir: admin.inboxDir,
           stateDir: admin.stateDir,
           nav: config.nav,
+          ownerEmail: config.ownerEmail,
+          users: createUserStore(pool),
         }),
       }
     : undefined,
 });
 if (admin) console.log(`admin menu enabled for ${admin.hostname}`);
+// Without an owner, anyone the admin Access policy lets in can use the menu, users page included.
+if (admin && !config.ownerEmail) console.warn("OWNER_EMAIL is not set: the admin menu relies on the Access policy alone");
 server.listen(config.port, () => {
   console.log(`listening on port ${config.port} (version ${config.appVersion})`);
 });

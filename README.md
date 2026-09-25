@@ -47,7 +47,7 @@ AGENTS.md            rules for AI-assisted changes (CLAUDE.md points here)
 PRODUCT.md           purpose, users and acceptance criteria
 docs/                intake checklist, deployment profiles, decisions
 src/                 config.ts, db.ts (pool, migrations, queries), minecraft.ts (status ping), tailscale.ts (host summary),
-                     access.ts (Access token check), admin.ts (admin menu), html.ts, app.ts, server.ts
+                     access.ts (Access token check), admin.ts (admin menu), users.ts (invited users), html.ts, app.ts, server.ts
 migrations/          numbered SQL migrations, applied in order at startup
 tests/               node:test tests
 Dockerfile           production image
@@ -91,6 +91,7 @@ The public home page (`src/home.ts`) follows the "Industry" design language from
 | `ADMIN_HOSTNAME` | Hostname the private admin menu is served on. The admin menu is on only when this and the next four are all set | none |
 | `ACCESS_TEAM_DOMAIN` | Cloudflare Access team domain, e.g. `<team>.cloudflareaccess.com`; its signing keys verify admin requests | none |
 | `ACCESS_AUD` | Audience tag of the Access application protecting `ADMIN_HOSTNAME` | none |
+| `OWNER_EMAIL` | The owner's Google account email. When set, only this account may use the admin menu, whatever the Access policy allows. Strongly recommended whenever the admin menu is on; the app logs a warning at startup without it | none |
 | `MC_ACTIONS_INBOX_DIR` | Absolute path, inside the container, of the runner's inbox (writable) | none |
 | `MC_ACTIONS_STATE_DIR` | Absolute path, inside the container, of the runner's state (read-only) | none |
 | `PUBLIC_STATUS_URL` | Absolute URL of the public status page, used by the header's Status button and the footer. Falls back to `/` | none |
@@ -166,13 +167,23 @@ A private menu for the Minecraft servers: who is online by name, each server's s
   - *Restart* and *Stop* go through a confirmation page that names who is online.
   - One action runs at a time; the runner also rate-limits and re-checks the server's state.
   - **Stop is sticky**: a stopped server stays stopped, even across host reboots, until someone presses Start.
+- **Owner only.** With `OWNER_EMAIL` set, a valid Access token for any other account also gets `403`, so a policy widened by mistake in the Access dashboard does not open the menu.
 - **Browser protections:** form posts must be same-origin — `Sec-Fetch-Site: same-origin`, or a matching `Origin` when the browser sends no `Sec-Fetch-Site`. Admin pages send `no-store`, and a Content-Security-Policy that allows no scripts and no framing.
+
+### Users
+
+The admin menu's **Users** page is the list of people who may sign in to the status page: add a Google account email to invite someone, remove it to take their access away. There is no invitation email — send them the status page link yourself. Someone shows as *Invited* until they first sign in, then *Active*, with when they were last seen.
+
+The owner (`OWNER_EMAIL`) always has access and is never on the list. Emails are stored lower-cased and are personal data; see "Persistent data".
+
+The list is managed now but not yet enforced: until the status page requires a Cloudflare Access sign-in, the page stays public and the Users page says so.
 
 ## Persistent data
 
 | Data | Where | Backup | Restore |
 |---|---|---|---|
 | Release history | `status` database on the P410's shared PostgreSQL, owned by the `status` role | Included in the nightly `pg_dumpall` | Restore the dump into a clean instance; the table is also safe to lose — it is history only |
+| Invited users (`users` table: email, when added, first and last sign-in) | Same database | Included in the nightly `pg_dumpall`. **Personal data**: the emails of the people invited | Restore the dump. If it is lost, the owner keeps access and re-invites everyone else |
 
 Schema changes are numbered files in `migrations/`, applied once each at startup inside a transaction. Each file carries its own recovery note. Rolling back an image does not reverse a migration.
 

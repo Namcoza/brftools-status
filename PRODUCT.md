@@ -2,12 +2,12 @@
 
 ## Purpose
 
-A small status page. It shows the release history of this app: every time a new version starts, it records the version (commit SHA) and start time. It also shows whether the family's Minecraft servers are up and how many players are online, and whether the host is connected to its Tailscale network, for troubleshooting remote access. A private admin menu lets the owner save, restart, stop and start the Minecraft servers from a browser, without SSH. It is the pilot for the P410 Docker deployment path — its main value is proving that path, not the page itself.
+A small status page. It shows the release history of this app: every time a new version starts, it records the version (commit SHA) and start time. It also shows whether the family's Minecraft servers are up and how many players are online, and whether the host is connected to its Tailscale network, for troubleshooting remote access. A private admin menu lets the owner save, restart, stop and start the Minecraft servers from a browser, without SSH, and keep the list of people invited to the status page. It is the pilot for the P410 Docker deployment path — its main value is proving that path, not the page itself.
 
 ## Users
 
 - **Public page:** Brendon, the family, and anyone who visits the hostname, from any network.
-- **Admin menu:** Brendon only, after a Cloudflare Access login.
+- **Admin menu:** Brendon only, after a Cloudflare Access login, checked by the app against the configured owner.
 
 ## Hosting profile
 
@@ -21,16 +21,17 @@ P410 Docker. It needs a server process and PostgreSQL. It reads files written by
   - The host's Tailscale state, relay, health warnings, and the names, OS and online state of the other devices on the tailnet.
   - For each media service: its name, whether it is up, and its version where that is free. **No address, port or link target.**
   - Minecraft player names are never shown. Tailscale device names are shown by the owner's decision; IP addresses and tailnet names are not.
-- **Admin hostname:** private. It sits behind a Cloudflare Access application, and the app verifies the Access token on every request, so a request that reaches the app any other way gets nothing. It shows player names and a recent server log with IP addresses removed.
+- **Admin hostname:** private. It sits behind a Cloudflare Access application, and the app verifies the Access token on every request, so a request that reaches the app any other way gets nothing. It shows player names, a recent server log with IP addresses removed, and the emails of invited users.
 - Which addresses and hostnames are used is production configuration, not part of this repository.
 
 ## Data
 
 - **Release history:** in its own `status` database on the P410's PostgreSQL. No personal data. Replaceable: losing it loses only history.
+- **Invited users:** the Google account emails of people invited to the status page, with when they were added and last signed in, in the same database. Personal data, kept only while they are invited. Losing it means re-inviting them.
 - **Minecraft status:** held in memory only.
 - **Tailscale summary, admin server state and action history:** host-written files, read on each view.
 - **Admin requests:** small files handed to the host and deleted by it.
-- None of these is stored by the app.
+- Apart from releases and invited users, none of these is stored by the app.
 
 ## Acceptance criteria
 
@@ -44,6 +45,7 @@ P410 Docker. It needs a server process and PostgreSQL. It reads files written by
 8. No admin page or action is reachable without a valid Access token for the admin application, by any route.
 9. From the admin menu, the owner can save, restart, stop and start each Minecraft server, and see progress until the server is healthy or the action has failed. Players online are warned before a restart or stop.
 10. `GET /` shows each configured media service as up or down, refreshed at least every minute, using no credential and revealing no address. A card leads to the service only through Access.
+11. From the admin menu, the owner can invite a person by Google account email, see whether they have signed in, and remove them. With an owner configured, no other account can use the admin menu, even with a valid Access token.
 
 ## Out of scope
 

@@ -2,6 +2,7 @@
 
 import { MEDIA_KINDS, type MediaKind, type MediaServiceConfig } from "./media.ts";
 import type { MinecraftServerConfig } from "./minecraft.ts";
+import { normaliseEmail } from "./users.ts";
 
 export interface AdminConfig {
   hostname: string;
@@ -67,6 +68,9 @@ export interface Config {
   mediaServices: MediaServiceConfig[];
   tailscaleStatusFile: string;
   admin: AdminConfig | null;
+  // The owner's Google account email, lower-cased; "" when unset. Only this account may use the
+  // admin menu, and it always has access without being on the users list.
+  ownerEmail: string;
   nav: NavConfig;
   homeFacts: HomeFacts;
 }
@@ -106,6 +110,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     mediaServices: loadMediaServices(env),
     tailscaleStatusFile,
     admin: loadAdmin(env, minecraftServers),
+    ownerEmail: loadOwnerEmail(env),
     nav: loadNav(env),
     homeFacts: loadHomeFacts(env),
   };
@@ -277,6 +282,14 @@ function loadMinecraftServers(env: NodeJS.ProcessEnv): MinecraftServerConfig[] {
     servers.push({ id, name, host: match[1], port: pingPort, join, mapUrl });
   }
   return servers;
+}
+
+function loadOwnerEmail(env: NodeJS.ProcessEnv): string {
+  const raw = env.OWNER_EMAIL || "";
+  if (!raw) return "";
+  const email = normaliseEmail(raw);
+  if (!email) throw new Error(`OWNER_EMAIL must be an email address, got "${raw}"`);
+  return email;
 }
 
 // The private admin menu is on only when every one of its variables is set.

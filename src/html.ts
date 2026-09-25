@@ -83,6 +83,11 @@ const STYLES = `
       .btn-small { min-height: 32px; padding: 0 12px; font-size: 13px; }
       .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
       .actions form { margin: 0; }
+      .field { min-height: 40px; min-width: 0; flex: 1 1 18rem; padding: 0 12px; border: 1px solid var(--line);
+        border-radius: 0; background: transparent; color: var(--text); font: inherit; }
+      .field:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+      .add-user { margin: 16px 0 0; }
+      .add-user label { font-size: 13px; color: var(--muted); }
 
       .cards { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr)); }
       .card { position: relative; border: 1px solid var(--line); padding: 12px 16px; }
@@ -137,6 +142,7 @@ const STYLES = `
         /* Action buttons go full width for the thumb; the header's Status button does not. */
         .actions > .btn, .actions form { width: 100%; }
         .actions form .btn { width: 100%; }
+        .wide-only { display: none; }
       }
 `;
 
