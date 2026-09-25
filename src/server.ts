@@ -1,6 +1,7 @@
 import { createAccessVerifier } from "./access.ts";
 import { createAdminHandler } from "./admin.ts";
 import { createApp } from "./app.ts";
+import { createStatusGate } from "./gate.ts";
 import { loadConfig } from "./config.ts";
 import { createPool, migrate, recordRelease } from "./db.ts";
 import { createMediaMonitor } from "./media.ts";
@@ -29,7 +30,8 @@ minecraft.start();
 const media = createMediaMonitor(config.mediaServices);
 media.start();
 
-const { tailscaleStatusFile, admin } = config;
+const { tailscaleStatusFile, admin, statusAccess } = config;
+const users = createUserStore(pool);
 const server = createApp(config, pool, {
   minecraft: minecraft.statuses,
   media: media.statuses,
@@ -49,13 +51,23 @@ const server = createApp(config, pool, {
           stateDir: admin.stateDir,
           nav: config.nav,
           ownerEmail: config.ownerEmail,
-          users: createUserStore(pool),
+          users,
+          statusSignIn: statusAccess !== null,
         }),
       }
+    : undefined,
+  // Sign-in on the status page: the owner and invited users only.
+  gate: statusAccess
+    ? createStatusGate({
+        verifier: createAccessVerifier({ teamDomain: statusAccess.teamDomain, audience: statusAccess.audience }),
+        ownerEmail: config.ownerEmail,
+        users,
+      })
     : undefined,
 });
 if (admin) console.log(`admin menu enabled for ${admin.hostname}`);
 // Without an owner, anyone the admin Access policy lets in can use the menu, users page included.
+console.log(statusAccess ? "status page sign-in is on" : "status page sign-in is off: STATUS_ACCESS_AUD is not set, so the page is public");
 if (admin && !config.ownerEmail) console.warn("OWNER_EMAIL is not set: the admin menu relies on the Access policy alone");
 server.listen(config.port, () => {
   console.log(`listening on port ${config.port} (version ${config.appVersion})`);

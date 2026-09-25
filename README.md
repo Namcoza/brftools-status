@@ -1,6 +1,6 @@
 # brftools-status
 
-Status page for the brftools P410 deploy pilot. The public home page is five tabs — **Overview, Minecraft, Media, Remote access and Releases** — each server-rendered from the app's own monitors: Minecraft ping, media health checks, the host's Tailscale connection and the release history recorded in PostgreSQL each time a version starts. A private admin menu on a separate hostname lets the owner save, restart, stop and start the Minecraft servers. See [`PRODUCT.md`](PRODUCT.md) for purpose and acceptance criteria.
+Status page for the brftools P410 deploy pilot. Only the owner and invited people can see it, after signing in with Google through Cloudflare Access. The home page is five tabs — **Overview, Minecraft, Media, Remote access and Releases** — each server-rendered from the app's own monitors: Minecraft ping, media health checks, the host's Tailscale connection and the release history recorded in PostgreSQL each time a version starts. A private admin menu on a separate hostname lets the owner save, restart, stop and start the Minecraft servers. See [`PRODUCT.md`](PRODUCT.md) for purpose and acceptance criteria.
 
 **branch = work · pull request = validation · main = live**
 
@@ -63,7 +63,7 @@ Pages follow the brftools design canvas: one mark, one set of light/dark tokens,
 
 Constraints that shape it: system fonts, inline CSS and inline SVG only (the admin menu allows no scripts, web fonts or external stylesheets), square corners, one hairline border weight, no shadows, and no animation — every page reloads itself on a timer, so a reload has to be invisible. State always reads as a word, a shape and a colour together, and the status colours meet WCAG AA in both themes.
 
-The public home page (`src/home.ts`) follows the "Industry" design language from the design handoff this app was redesigned against, adapted to these same constraints: its five tabs (`/`, `/minecraft`, `/media`, `/remote`, `/releases`) are plain server-rendered routes, not client-side state, and there is no copy-to-clipboard button or live ticker — the original HTML design reference has neither restriction, since it is a design mockup, not production code.
+The home page (`src/home.ts`) follows the "Industry" design language from the design handoff this app was redesigned against, adapted to these same constraints: its five tabs (`/`, `/minecraft`, `/media`, `/remote`, `/releases`) are plain server-rendered routes, not client-side state, and there is no copy-to-clipboard button or live ticker — the original HTML design reference has neither restriction, since it is a design mockup, not production code.
 
 ## Hosting profile
 
@@ -89,8 +89,9 @@ The public home page (`src/home.ts`) follows the "Industry" design language from
 | `MEDIA_n_URL` | Where `/open/<id>` sends a signed-in browser | required with `MEDIA_n_CHECK` |
 | `MEDIA_n_LAN_URL` | Home-network address, listed on the admin menu's media page | none |
 | `ADMIN_HOSTNAME` | Hostname the private admin menu is served on. The admin menu is on only when this and the next four are all set | none |
-| `ACCESS_TEAM_DOMAIN` | Cloudflare Access team domain, e.g. `<team>.cloudflareaccess.com`; its signing keys verify admin requests | none |
+| `ACCESS_TEAM_DOMAIN` | Cloudflare Access team domain, e.g. `<team>.cloudflareaccess.com`; its signing keys verify admin and status page sign-ins | none |
 | `ACCESS_AUD` | Audience tag of the Access application protecting `ADMIN_HOSTNAME` | none |
+| `STATUS_ACCESS_AUD` | Audience tag of the Access application protecting the status hostname. Set, the status page requires sign-in (see "Sign-in"); needs `ACCESS_TEAM_DOMAIN` and `OWNER_EMAIL`, and must differ from `ACCESS_AUD`. Unset, the status page is public and the app logs so at startup | none |
 | `OWNER_EMAIL` | The owner's Google account email. When set, only this account may use the admin menu, whatever the Access policy allows. Strongly recommended whenever the admin menu is on; the app logs a warning at startup without it | none |
 | `MC_ACTIONS_INBOX_DIR` | Absolute path, inside the container, of the runner's inbox (writable) | none |
 | `MC_ACTIONS_STATE_DIR` | Absolute path, inside the container, of the runner's state (read-only) | none |
@@ -117,7 +118,7 @@ Shows whether the host is connected to its tailnet, for troubleshooting remote a
 | No recent update | Snapshot older than 3 minutes — the host timer has stopped |
 | No data | File missing or unreadable |
 
-**Device names are shown on this public page** by the owner's decision. As with Minecraft, Tailscale state never affects `/healthz`. The host script and timer are not part of this repository.
+**Device names are shown on the status page** by the owner's decision. As with Minecraft, Tailscale state never affects `/healthz`. The host script and timer are not part of this repository.
 
 ### Media section
 
@@ -125,7 +126,7 @@ Shows whether each configured media service is up: name, state and — where the
 
 - **No credentials, ever.** Each `MEDIA_n_CHECK` endpoint answers unauthenticated: Plex `/identity`, Sonarr and Radarr `/ping`, SABnzbd `/api?mode=version&output=json`, Audiobookshelf `/status`. The app holds no API key and can only read. Sonarr and Radarr therefore show up or down only; their version needs a key.
 - **`http` is the fallback kind** for a service with no credential-free health or version endpoint (LazyLibrarian, for one): it is up if it answers, and a redirect counts, since web UIs often redirect their root. The other kinds require a `2xx`, because their body is parsed.
-- **No addresses on the public page.** Each card is a link to `https://<ADMIN_HOSTNAME>/open/<id>`, so Cloudflare Access sits between the click and the address. The admin menu's `/media` page is the only place a service's address is shown, and `/open/<id>` redirects to `MEDIA_n_URL`. The id is a key into the configured list, never a URL, so it cannot be turned into an open redirect.
+- **No addresses on the status page.** For the owner, each card is a link to `https://<ADMIN_HOSTNAME>/open/<id>`; invited users get no link, since the admin menu is owner-only, so Cloudflare Access sits between the click and the address. The admin menu's `/media` page is the only place a service's address is shown, and `/open/<id>` redirects to `MEDIA_n_URL`. The id is a key into the configured list, never a URL, so it cannot be turned into an open redirect.
 - **Polling, not per-request:** every 30 seconds with a 3-second timeout, held in memory. Any non-200, timeout or unreadable body is "Down". Audiobookshelf's `ConfigPath` and `MetadataPath` are discarded at parse time.
 - A service being down never affects `/healthz`.
 - Each service's group (player / librarian / source & downloader), role and description are static, non-secret metadata in `src/service-meta.ts`, keyed by `MEDIA_n_ID`. A service with no entry there still renders, without a role or description.
@@ -176,7 +177,20 @@ The admin menu's **Users** page is the list of people who may sign in to the sta
 
 The owner (`OWNER_EMAIL`) always has access and is never on the list. Emails are stored lower-cased and are personal data; see "Persistent data".
 
-The list is managed now but not yet enforced: until the status page requires a Cloudflare Access sign-in, the page stays public and the Users page says so.
+The list takes effect only while sign-in is on (`STATUS_ACCESS_AUD` set); otherwise the status page is public and the Users page says so.
+
+### Sign-in
+
+With `STATUS_ACCESS_AUD` set, the status hostname serves only the owner and invited users.
+
+- **Cloudflare does the login.** A Cloudflare Access application on the status hostname, with Google as its only login method and a policy that allows any Google account, sends visitors through Google and adds a signed `Cf-Access-Jwt-Assertion` token to each request. The app holds no Google or Cloudflare credential.
+- **The app decides who gets in.** On every request it verifies the token exactly as the admin menu does (signature, audience `STATUS_ACCESS_AUD`, issuer, expiry), then admits the email if it is `OWNER_EMAIL` or on the users list. So the users list is the only list to maintain; the Access policy never names anyone.
+  - No token, or an invalid one: `403`, "Sign in required". Only reachable by bypassing Access, such as the LAN port.
+  - A Google account not on the list: `403`, "Not invited", with a sign-out link (`/cdn-cgi/access/logout`) to try another account.
+  - Removing someone refuses them on their next request, even though their Access session is still valid.
+- **`/healthz` is not gated**, so the container health check and automatic rollback keep working. Access still blocks it from outside.
+- A user's first sign-in and latest visit are recorded, the latest at most every 5 minutes, since pages reload every minute.
+- **Turning it on:** create the Access application first, then set `STATUS_ACCESS_AUD` to its audience tag. The other way round refuses everyone, because requests arrive without a token. **Turning it off:** unset `STATUS_ACCESS_AUD` and redeploy; the page becomes public again.
 
 ## Persistent data
 
