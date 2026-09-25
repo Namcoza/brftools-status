@@ -6,6 +6,7 @@ import { createApp } from "../src/app.ts";
 import { loadConfig } from "../src/config.ts";
 import { createPool, listReleases, migrate, recordRelease, type Pool } from "../src/db.ts";
 import type { MinecraftServerConfig, ServerStatus } from "../src/minecraft.ts";
+import { createUserStore } from "../src/users.ts";
 import { listenOn, send } from "./http-helper.ts";
 
 const family: MinecraftServerConfig = {
@@ -40,7 +41,7 @@ describe("with a database", { skip: skipDatabase }, () => {
       throw new Error("TEST_DATABASE_URL must name a database containing 'test'");
     }
     pool = createPool(databaseUrl);
-    await pool.query("DROP TABLE IF EXISTS releases, schema_migrations");
+    await pool.query("DROP TABLE IF EXISTS releases, users, schema_migrations");
     // Every Minecraft server is offline and there is no Tailscale data: the app must still report healthy.
     server = createApp(loadConfig({ DATABASE_URL: databaseUrl, APP_VERSION: "test-sha" }), pool, {
       minecraft: () => offline,
@@ -55,8 +56,24 @@ describe("with a database", { skip: skipDatabase }, () => {
   });
 
   test("migrations apply once and are idempotent", async () => {
-    assert.deepEqual(await migrate(pool, migrationsDir), ["001_create_releases.sql"]);
+    assert.deepEqual(await migrate(pool, migrationsDir), ["001_create_releases.sql", "002_create_users.sql"]);
     assert.deepEqual(await migrate(pool, migrationsDir), []);
+  });
+
+  test("users can be invited once, listed newest first, and removed", async () => {
+    const users = createUserStore(pool);
+    assert.equal(await users.add("first@example.com"), true);
+    assert.equal(await users.add("second@example.com"), true);
+    assert.equal(await users.add("first@example.com"), false);
+    const listed = await users.list();
+    assert.deepEqual(listed.map((user) => user.email).sort(), ["first@example.com", "second@example.com"]);
+    assert.equal(listed[0]?.firstSeenAt, null);
+    assert.equal(listed[0]?.lastSeenAt, null);
+    assert.equal(await users.remove("first@example.com"), true);
+    assert.equal(await users.remove("first@example.com"), false);
+    assert.deepEqual((await users.list()).map((user) => user.email), ["second@example.com"]);
+    // The table only holds lower-case emails; the store is always given normalised ones.
+    await assert.rejects(pool.query("INSERT INTO users (email) VALUES ('Upper@Example.com')"), /check constraint/);
   });
 
   test("releases are listed newest first", async () => {

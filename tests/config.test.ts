@@ -180,6 +180,12 @@ test("a partial or invalid admin configuration fails at startup", () => {
   );
 });
 
+test("OWNER_EMAIL is optional, lower-cased, and must be an email address", () => {
+  assert.equal(loadConfig(required).ownerEmail, "");
+  assert.equal(loadConfig({ ...required, OWNER_EMAIL: " Owner@Example.com " }).ownerEmail, "owner@example.com");
+  assert.throws(() => loadConfig({ ...required, OWNER_EMAIL: "owner" }), /OWNER_EMAIL must be an email address/);
+});
+
 test("header and footer links are optional, and must be http or https", () => {
   assert.deepEqual(loadConfig(required).nav, { statusUrl: "", gamesUrl: "", mapUrl: "" });
   assert.deepEqual(

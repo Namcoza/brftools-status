@@ -19,6 +19,7 @@ import {
 } from "./html.ts";
 import type { MediaServiceConfig, MediaStatus } from "./media.ts";
 import type { MinecraftServerConfig, ServerStatus } from "./minecraft.ts";
+import { normaliseEmail, type User, type UserStore } from "./users.ts";
 
 // The private Minecraft admin menu, served only on the admin hostname and only to requests that
 // carry a valid Cloudflare Access token. It never touches Minecraft or Docker itself: an action is
@@ -158,11 +159,19 @@ export interface AdminOptions {
   stateDir: string;
   // Header and footer links; statusUrl is the public status page.
   nav?: { statusUrl: string; gamesUrl: string; mapUrl: string };
+  // When set, only this Google account (lower-case) may use the admin menu, whatever the Access
+  // policy allows. Unset leaves it to Access alone.
+  ownerEmail?: string;
+  // The people invited to the status page. Unset hides the Users page.
+  users?: UserStore;
+  // Whether the status page requires sign-in, so the Users page can say if its list has effect yet.
+  statusSignIn?: boolean;
   now?: () => Date;
 }
 
 export function createAdminHandler(options: AdminOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  const { hostname, verifier, servers, inboxDir, stateDir } = options;
+  const { hostname, verifier, servers, inboxDir, stateDir, users } = options;
+  const ownerEmail = options.ownerEmail ?? "";
   const mediaServices = options.mediaServices ?? [];
   const mediaStatuses = options.media ?? (() => []);
   const now = options.now ?? (() => new Date());
@@ -245,7 +254,7 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
       <div class="cards">
         ${cards.join("\n        ")}
       </div>
-      ${mediaServices.length ? `<div class="actions"><a class="btn" href="/media">Media services</a></div>` : ""}`;
+      ${menuLinks()}`;
     return adminPage("Servers", body, 30);
   }
 
@@ -437,6 +446,71 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
     return adminPage("Media services", body, 30);
   }
 
+  function menuLinks(): string {
+    const links = [
+      mediaServices.length ? `<a class="btn" href="/media">Media services</a>` : "",
+      users ? `<a class="btn" href="/users">Users</a>` : "",
+    ].filter(Boolean);
+    return links.length ? `<div class="actions">${links.join("")}</div>` : "";
+  }
+
+  // Who may sign in to the status page. Invitations are not emailed: the owner sends the link.
+  async function usersPage(email: string): Promise<string> {
+    const list = await users!.list();
+    const t = now();
+    const statusLink = /^https?:\/\//.test(nav.status) ? nav.status : "";
+    const rows = list.map((user) => {
+      const state = userState(user);
+      return `<tr><td>${escapeHtml(user.email)}</td><td>${statusPill(state.tone, state.label)}</td><td class="wide-only">${ago(user.addedAt, t)} ago</td><td>${user.lastSeenAt ? `${ago(user.lastSeenAt, t)} ago` : "Never"}</td><td>${userForm("remove", user.email, "Remove", "btn-small btn-danger")}</td></tr>`;
+    });
+    const table = rows.length
+      ? `<table class="table"><thead><tr><th>Email</th><th>State</th><th class="wide-only">Added</th><th>Last seen</th><th></th></tr></thead><tbody>${rows.join("")}</tbody></table>`
+      : `<p class="meta">Nobody has been invited yet.</p>`;
+    const body = `${breadcrumbs([{ label: "Status", href: nav.status }, { label: "Users" }])}
+      <h1>Users</h1>
+      <p>People on this list can sign in to the status page with their Google account. Removing someone takes effect on their next page load.</p>
+      ${options.statusSignIn ? "" : `<p class="meta"><strong>The status page does not require sign-in yet</strong>, so this list has no effect until it does (README, "Users").</p>`}
+      <form class="add-user" method="post" action="/users">
+        <input type="hidden" name="action" value="add" />
+        <label for="email">Google account email</label>
+        <div class="actions">
+          <input class="field" id="email" name="email" type="email" required maxlength="254" autocomplete="off" />
+          <button class="btn btn-primary" type="submit">Invite</button>
+        </div>
+      </form>
+      <p class="meta">There is no invitation email. ${statusLink ? `Send them the link yourself: <code>${escapeHtml(statusLink)}</code>.` : "Send them the status page link yourself."}</p>
+      <h2>Invited</h2>
+      ${table}
+      <p class="meta">Signed in as ${escapeHtml(email)}.${ownerEmail ? " As the owner you always have access and are not listed." : ""}</p>`;
+    return adminPage("Users", body);
+  }
+
+  async function postUsers(req: IncomingMessage, res: ServerResponse, email: string) {
+    const back = `<a class="btn" href="/users">Back to users</a>`;
+    if (!sameOrigin(req)) {
+      console.error(`admin: refused cross-site POST to users (${JSON.stringify(email)})`);
+      return sendHtml(res, 403, messagePage("Refused", "The request did not come from the admin menu itself.", "bad"));
+    }
+    const body = await readBody(req, 1024);
+    if (body === null) return sendHtml(res, 413, messagePage("Too large", back, "bad"));
+    const form = new URLSearchParams(body);
+    const action = form.get("action");
+    const target = normaliseEmail(form.get("email") ?? "");
+    if (!target) return sendHtml(res, 400, messagePage("That is not an email address", back, "bad"));
+    if (target === ownerEmail) {
+      return sendHtml(res, 400, messagePage("That is the owner's account", `It always has access. ${back}`, "warn"));
+    }
+    if (action === "add") {
+      if (await users!.add(target)) console.log(`admin: ${JSON.stringify(email)} invited ${JSON.stringify(target)}`);
+    } else if (action === "remove") {
+      if (await users!.remove(target)) console.log(`admin: ${JSON.stringify(email)} removed ${JSON.stringify(target)}`);
+    } else {
+      return sendHtml(res, 400, messagePage("Unknown action", back, "bad"));
+    }
+    res.writeHead(303, { location: "/users", "cache-control": "no-store" });
+    res.end();
+  }
+
   function messagePage(title: string, html: string, tone: Tone = "bad"): string {
     const body = `${breadcrumbs(crumbRoot())}
       <p class="state ${tone}">${glyph(tone)}</p>
@@ -462,6 +536,11 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
       console.error(`admin: refused ${req.method} ${JSON.stringify(req.url)}: ${reason}`);
       return sendHtml(res, 403, messagePage("Forbidden", "Sign in through Cloudflare Access to use the admin menu."));
     }
+    // Access proves who this is; only the owner may act. A too-wide Access policy stops here.
+    if (ownerEmail && email.toLowerCase() !== ownerEmail) {
+      console.error(`admin: refused ${req.method} ${JSON.stringify(req.url)}: ${JSON.stringify(email)} is not the owner`);
+      return sendHtml(res, 403, messagePage("Forbidden", "The admin menu is for the owner only."));
+    }
 
     const [section, name, sub, ...rest] = url.pathname.split("/").filter(Boolean);
     const server = section === "servers" ? servers.find((candidate) => candidate.id === name) : undefined;
@@ -476,6 +555,10 @@ export function createAdminHandler(options: AdminOptions): (req: IncomingMessage
       if (req.method === "POST" && server && sub === "actions") return postAction(req, res, server, email);
       if (req.method === "GET" && section === "actions" && name && REQUEST_ID.test(name) && sub === undefined) {
         return sendHtml(res, 200, await progressPage(name));
+      }
+      if (users && section === "users" && name === undefined) {
+        if (req.method === "GET") return sendHtml(res, 200, await usersPage(email));
+        if (req.method === "POST") return postUsers(req, res, email);
       }
       if (req.method === "GET" && section === "media" && name === undefined && mediaServices.length > 0) {
         return sendHtml(res, 200, mediaPage(email));
@@ -524,6 +607,14 @@ const FINISHED: Record<string, { label: string; tone: Tone }> = {
 };
 
 const OUTCOMES: Record<string, string> = { done: "Done", failed: "Failed", rejected: "Refused", running: "In progress" };
+
+function userState(user: User): { label: string; tone: Tone } {
+  return user.firstSeenAt ? { label: "Active", tone: "ok" } : { label: "Invited", tone: "idle" };
+}
+
+function userForm(action: "add" | "remove", email: string, text: string, variant: string): string {
+  return `<form method="post" action="/users"><input type="hidden" name="action" value="${action}" /><input type="hidden" name="email" value="${escapeHtml(email)}" /><button class="btn ${variant}" type="submit">${escapeHtml(text)}</button></form>`;
+}
 
 function mediaStateOf(status: MediaStatus | undefined): { label: string; tone: Tone } {
   if (!status || status.state === "unknown") return { label: "Checking…", tone: "idle" };
