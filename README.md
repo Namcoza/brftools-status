@@ -1,6 +1,6 @@
 # brftools-status
 
-Status page for the brftools P410 deploy pilot. Each time a version of the app starts, it records the version and start time in PostgreSQL and lists them on its home page. Above that, it shows whether each configured Minecraft server is up and how many players are online, and the host's Tailscale connection. A private admin menu on a separate hostname lets the owner save, restart, stop and start the Minecraft servers. See [`PRODUCT.md`](PRODUCT.md) for purpose and acceptance criteria.
+Status page for the brftools P410 deploy pilot. The public home page is five tabs — **Overview, Minecraft, Media, Remote access and Releases** — each server-rendered from the app's own monitors: Minecraft ping, media health checks, the host's Tailscale connection and the release history recorded in PostgreSQL each time a version starts. A private admin menu on a separate hostname lets the owner save, restart, stop and start the Minecraft servers. See [`PRODUCT.md`](PRODUCT.md) for purpose and acceptance criteria.
 
 **branch = work · pull request = validation · main = live**
 
@@ -63,6 +63,8 @@ Pages follow the brftools design canvas: one mark, one set of light/dark tokens,
 
 Constraints that shape it: system fonts, inline CSS and inline SVG only (the admin menu allows no scripts, web fonts or external stylesheets), square corners, one hairline border weight, no shadows, and no animation — every page reloads itself on a timer, so a reload has to be invisible. State always reads as a word, a shape and a colour together, and the status colours meet WCAG AA in both themes.
 
+The public home page (`src/home.ts`) follows the "Industry" design language from the design handoff this app was redesigned against, adapted to these same constraints: its five tabs (`/`, `/minecraft`, `/media`, `/remote`, `/releases`) are plain server-rendered routes, not client-side state, and there is no copy-to-clipboard button or live ticker — the original HTML design reference has neither restriction, since it is a design mockup, not production code.
+
 ## Hosting profile
 
 **P410 Docker.** See [`docs/deployment-profiles.md`](docs/deployment-profiles.md), Profile B.
@@ -94,6 +96,7 @@ Constraints that shape it: system fonts, inline CSS and inline SVG only (the adm
 | `PUBLIC_STATUS_URL` | Absolute URL of the public status page, used by the header's Status button and the footer. Falls back to `/` | none |
 | `PUBLIC_GAMES_URL` | Absolute URL of the games hub, for the footer. Omitted when unset | none |
 | `PUBLIC_MAP_URL` | Absolute URL of the world map, for the footer. Omitted when unset | none |
+| `HOME_FACTS_JSON` | One JSON object of decorative, non-monitored facts for the Overview and Remote access tabs. See "Overview and Remote access facts" below. Unset hides all of it | none |
 
 Real values never go in the repository. In production, `.env` is rendered from 1Password at deploy time.
 
@@ -124,6 +127,28 @@ Shows whether each configured media service is up: name, state and — where the
 - **No addresses on the public page.** Each card is a link to `https://<ADMIN_HOSTNAME>/open/<id>`, so Cloudflare Access sits between the click and the address. The admin menu's `/media` page is the only place a service's address is shown, and `/open/<id>` redirects to `MEDIA_n_URL`. The id is a key into the configured list, never a URL, so it cannot be turned into an open redirect.
 - **Polling, not per-request:** every 30 seconds with a 3-second timeout, held in memory. Any non-200, timeout or unreadable body is "Down". Audiobookshelf's `ConfigPath` and `MetadataPath` are discarded at parse time.
 - A service being down never affects `/healthz`.
+- Each service's group (player / librarian / source & downloader), role and description are static, non-secret metadata in `src/service-meta.ts`, keyed by `MEDIA_n_ID`. A service with no entry there still renders, without a role or description.
+
+### Overview and Remote access facts
+
+`HOME_FACTS_JSON` is one JSON object holding content no monitor produces: drive usage, a small hardware grid, an open-issues list, and the "who can reach what" table on the Remote access tab. It is entirely optional — omit it, or any field in it, and that part of the page is simply not shown. None of its keys are validated beyond shape and type, and none of it is read anywhere else in the app.
+
+```json
+{
+  "drive": { "usedTb": 6.1, "totalTb": 8 },
+  "hardware": [
+    { "label": "Media drive", "value": "Seagate 8 TB · USB 3", "detail": "NTFS via ntfs3" }
+  ],
+  "issues": [
+    { "tag": "fix", "title": "…", "body": "…" }
+  ],
+  "reach": [
+    { "name": "Plex", "home": "Yes", "tail": "Yes", "any": "Yes", "anyOk": true, "note": "…" }
+  ]
+}
+```
+
+`hardware` and `reach` allow up to 8 entries each; `issues` up to 8; `issues[].tag` is `fix`, `waiting` or `note`. As with every other variable, real values (drive stats, hardware labels, anything naming an address or path) live only in production `.env`, never in this repository.
 
 ### Admin menu
 
