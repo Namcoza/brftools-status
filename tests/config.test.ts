@@ -186,6 +186,22 @@ test("OWNER_EMAIL is optional, lower-cased, and must be an email address", () =>
   assert.throws(() => loadConfig({ ...required, OWNER_EMAIL: "owner" }), /OWNER_EMAIL must be an email address/);
 });
 
+test("status page sign-in is off unless STATUS_ACCESS_AUD is set, and needs the team domain and owner", () => {
+  const signIn = { ...required, ACCESS_TEAM_DOMAIN: "team.example.com", OWNER_EMAIL: "owner@example.com", STATUS_ACCESS_AUD: "b".repeat(64) };
+  assert.equal(loadConfig(required).statusAccess, null);
+  assert.deepEqual(loadConfig(signIn).statusAccess, { teamDomain: "team.example.com", audience: "b".repeat(64) });
+  // The team domain on its own is shared and does not switch the admin menu on.
+  assert.equal(loadConfig(signIn).admin, null);
+  assert.throws(() => loadConfig({ ...signIn, ACCESS_TEAM_DOMAIN: "" }), /STATUS_ACCESS_AUD needs ACCESS_TEAM_DOMAIN/);
+  assert.throws(() => loadConfig({ ...signIn, OWNER_EMAIL: "" }), /STATUS_ACCESS_AUD needs OWNER_EMAIL/);
+  assert.throws(() => loadConfig({ ...signIn, STATUS_ACCESS_AUD: "short" }), /STATUS_ACCESS_AUD must be/);
+  assert.throws(
+    () => loadConfig({ ...withServer, ...admin, OWNER_EMAIL: "owner@example.com", STATUS_ACCESS_AUD: admin.ACCESS_AUD }),
+    /must be a different Access application/,
+  );
+  assert.ok(loadConfig({ ...withServer, ...admin, OWNER_EMAIL: "owner@example.com", STATUS_ACCESS_AUD: "b".repeat(64) }).admin);
+});
+
 test("header and footer links are optional, and must be http or https", () => {
   assert.deepEqual(loadConfig(required).nav, { statusUrl: "", gamesUrl: "", mapUrl: "" });
   assert.deepEqual(

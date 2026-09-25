@@ -12,6 +12,12 @@ export interface AdminConfig {
   stateDir: string;
 }
 
+// Sign-in on the status page itself: a second Cloudflare Access application, on the same team.
+export interface StatusAccessConfig {
+  teamDomain: string;
+  audience: string;
+}
+
 // Links in the shared header and footer, so every surface knows about the others.
 export interface NavConfig {
   statusUrl: string;
@@ -71,6 +77,8 @@ export interface Config {
   // The owner's Google account email, lower-cased; "" when unset. Only this account may use the
   // admin menu, and it always has access without being on the users list.
   ownerEmail: string;
+  // Null leaves the status page public.
+  statusAccess: StatusAccessConfig | null;
   nav: NavConfig;
   homeFacts: HomeFacts;
 }
@@ -80,6 +88,7 @@ const MAX_MEDIA_SERVICES = 12;
 const SLUG = /^[a-z0-9-]{1,32}$/;
 const HOSTNAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 const ADMIN_VARIABLES = ["ADMIN_HOSTNAME", "ACCESS_TEAM_DOMAIN", "ACCESS_AUD", "MC_ACTIONS_INBOX_DIR", "MC_ACTIONS_STATE_DIR"] as const;
+const AUDIENCE = /^[A-Za-z0-9]{16,128}$/;
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   // Empty values count as unset, so a copied .env.example behaves like no .env at all.
@@ -101,6 +110,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
 
   const minecraftServers = loadMinecraftServers(env);
+  const ownerEmail = loadOwnerEmail(env);
 
   return {
     port,
@@ -110,7 +120,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     mediaServices: loadMediaServices(env),
     tailscaleStatusFile,
     admin: loadAdmin(env, minecraftServers),
-    ownerEmail: loadOwnerEmail(env),
+    ownerEmail,
+    statusAccess: loadStatusAccess(env, ownerEmail),
     nav: loadNav(env),
     homeFacts: loadHomeFacts(env),
   };
@@ -292,10 +303,26 @@ function loadOwnerEmail(env: NodeJS.ProcessEnv): string {
   return email;
 }
 
+// On only when STATUS_ACCESS_AUD is set. It needs the owner, so that turning sign-in on can
+// never lock the owner out along with everyone else.
+function loadStatusAccess(env: NodeJS.ProcessEnv, ownerEmail: string): StatusAccessConfig | null {
+  const audience = env.STATUS_ACCESS_AUD || "";
+  if (!audience) return null;
+  const teamDomain = env.ACCESS_TEAM_DOMAIN || "";
+  if (!teamDomain) throw new Error("STATUS_ACCESS_AUD needs ACCESS_TEAM_DOMAIN");
+  if (!HOSTNAME.test(teamDomain)) throw new Error(`ACCESS_TEAM_DOMAIN must be a lower-case hostname, got "${teamDomain}"`);
+  if (!AUDIENCE.test(audience)) throw new Error("STATUS_ACCESS_AUD must be the status Access application's audience tag");
+  if (!ownerEmail) throw new Error("STATUS_ACCESS_AUD needs OWNER_EMAIL");
+  if (audience === env.ACCESS_AUD) throw new Error("STATUS_ACCESS_AUD must be a different Access application from ACCESS_AUD");
+  return { teamDomain, audience };
+}
+
 // The private admin menu is on only when every one of its variables is set.
 function loadAdmin(env: NodeJS.ProcessEnv, servers: MinecraftServerConfig[]): AdminConfig | null {
   const values = ADMIN_VARIABLES.map((name) => env[name] || "");
-  if (values.every((value) => !value)) return null;
+  // ACCESS_TEAM_DOMAIN is shared with the status page's sign-in, so on its own it does not
+  // switch the admin menu on.
+  if (ADMIN_VARIABLES.every((name, index) => name === "ACCESS_TEAM_DOMAIN" || !values[index])) return null;
 
   const missing = ADMIN_VARIABLES.filter((_, index) => !values[index]);
   if (missing.length > 0) {
@@ -305,7 +332,7 @@ function loadAdmin(env: NodeJS.ProcessEnv, servers: MinecraftServerConfig[]): Ad
 
   if (!HOSTNAME.test(hostname)) throw new Error(`ADMIN_HOSTNAME must be a lower-case hostname, got "${hostname}"`);
   if (!HOSTNAME.test(teamDomain)) throw new Error(`ACCESS_TEAM_DOMAIN must be a lower-case hostname, got "${teamDomain}"`);
-  if (!/^[A-Za-z0-9]{16,128}$/.test(audience)) throw new Error("ACCESS_AUD must be the Access application's audience tag");
+  if (!AUDIENCE.test(audience)) throw new Error("ACCESS_AUD must be the Access application's audience tag");
   for (const [name, dir] of [
     ["MC_ACTIONS_INBOX_DIR", inboxDir],
     ["MC_ACTIONS_STATE_DIR", stateDir],

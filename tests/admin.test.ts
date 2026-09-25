@@ -61,6 +61,9 @@ const users: UserStore = {
     invited = invited.filter((user) => user.email !== email);
     return invited.length < before;
   },
+  async visit(email) {
+    return invited.some((user) => user.email === email);
+  },
 };
 
 async function writeSnapshot(id: string, fields: Record<string, unknown> = {}): Promise<void> {

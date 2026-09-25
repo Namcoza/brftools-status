@@ -3,8 +3,10 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
 import { createApp } from "../src/app.ts";
+import type { StatusGate, Visitor } from "../src/gate.ts";
 import { loadConfig } from "../src/config.ts";
 import { createPool, listReleases, migrate, recordRelease, type Pool } from "../src/db.ts";
+import type { MediaServiceConfig, MediaStatus } from "../src/media.ts";
 import type { MinecraftServerConfig, ServerStatus } from "../src/minecraft.ts";
 import { createUserStore } from "../src/users.ts";
 import { listenOn, send } from "./http-helper.ts";
@@ -69,6 +71,21 @@ describe("with a database", { skip: skipDatabase }, () => {
     assert.deepEqual(listed.map((user) => user.email).sort(), ["first@example.com", "second@example.com"]);
     assert.equal(listed[0]?.firstSeenAt, null);
     assert.equal(listed[0]?.lastSeenAt, null);
+    // A visit records the first and latest sign-in, but only for someone invited.
+    assert.equal(await users.visit("first@example.com"), true);
+    assert.equal(await users.visit("stranger@example.com"), false);
+    const first = (await users.list()).find((user) => user.email === "first@example.com");
+    assert.ok(first?.firstSeenAt && first.lastSeenAt);
+    // The latest visit is recorded at most every few minutes; the first visit never moves.
+    await pool.query("UPDATE users SET first_seen_at = now() - interval '1 day', last_seen_at = now() - interval '1 hour' WHERE email = 'first@example.com'");
+    await users.visit("first@example.com");
+    const again = (await users.list()).find((user) => user.email === "first@example.com");
+    assert.ok(again?.lastSeenAt && Date.now() - again.lastSeenAt.getTime() < 60_000);
+    assert.ok(again?.firstSeenAt && Date.now() - again.firstSeenAt.getTime() > 3_600_000);
+    const lastSeen = again.lastSeenAt.getTime();
+    await users.visit("first@example.com");
+    const soon = (await users.list()).find((user) => user.email === "first@example.com");
+    assert.equal(soon?.lastSeenAt?.getTime(), lastSeen);
     assert.equal(await users.remove("first@example.com"), true);
     assert.equal(await users.remove("first@example.com"), false);
     assert.deepEqual((await users.list()).map((user) => user.email), ["second@example.com"]);
@@ -116,6 +133,90 @@ describe("with a database", { skip: skipDatabase }, () => {
   test("unknown paths return 404", async () => {
     const res = await fetch(`${baseUrl}/does-not-exist`);
     assert.equal(res.status, 404);
+  });
+
+  describe("with sign-in on", () => {
+    let gated: Server;
+    let port = 0;
+    const plex: MediaServiceConfig = {
+      id: "plex",
+      name: "Plex",
+      kind: "plex",
+      checkUrl: "http://plex.example/identity",
+      url: "http://tailnet.example:32400/web",
+      lanUrl: "",
+    };
+    const media: MediaStatus[] = [{ service: plex, state: "up", checkedAt: new Date(), result: { version: "1.0", setupIncomplete: false } }];
+    // Stands in for Access plus the users list; the real ones are tested in gate.test.ts.
+    const visitors: Record<string, Visitor> = {
+      owner: { kind: "owner", email: "owner@example.com" },
+      friend: { kind: "user", email: "friend@example.com" },
+      stranger: { kind: "uninvited", email: "stranger@example.com" },
+    };
+    const gate: StatusGate = {
+      async check(req) {
+        const token = String(req.headers["cf-access-jwt-assertion"] ?? "");
+        return visitors[token] ?? { kind: "anonymous", reason: "no Access token" };
+      },
+    };
+    const as = (token: string, path = "/") => send(port, "GET", path, { headers: { "cf-access-jwt-assertion": token } });
+
+    before(async () => {
+      gated = createApp(loadConfig({ DATABASE_URL: databaseUrl, APP_VERSION: "test-sha" }), pool, {
+        minecraft: () => offline,
+        media: () => media,
+        gate,
+        admin: { hostname: "admin.example.com", handle: async (_req, res) => void res.end("admin handler") },
+      });
+      port = await listenOn(gated);
+    });
+
+    after(() => {
+      gated.close();
+    });
+
+    test("every page refuses a request without a valid Access token", async () => {
+      for (const path of ["/", "/minecraft", "/media", "/remote", "/releases", "/does-not-exist"]) {
+        for (const token of ["", "forged"]) {
+          const reply = await as(token, path);
+          assert.equal(reply.status, 403, `${path} ${token}`);
+          assert.match(reply.body, /Sign in required/);
+          assert.doesNotMatch(reply.body, /test-sha|Plex|Family/);
+        }
+      }
+    });
+
+    test("a Google account that is not invited is told so, and sees nothing else", async () => {
+      const reply = await as("stranger", "/media");
+      assert.equal(reply.status, 403);
+      assert.equal(reply.headers["cache-control"], "no-store");
+      assert.match(reply.body, /stranger@example.com/);
+      assert.match(reply.body, /href="\/cdn-cgi\/access\/logout"/);
+      assert.doesNotMatch(reply.body, /test-sha|Plex/);
+    });
+
+    test("the owner and invited users see every tab", async () => {
+      for (const token of ["owner", "friend"]) {
+        for (const path of ["/", "/minecraft", "/media", "/remote", "/releases"]) {
+          assert.equal((await as(token, path)).status, 200, `${token} ${path}`);
+        }
+      }
+    });
+
+    test("only the owner gets Open links, which lead to the owner-only admin menu", async () => {
+      assert.match((await as("owner", "/media")).body, /https:\/\/admin.example.com\/open\/plex/);
+      const friend = await as("friend", "/media");
+      assert.match(friend.body, /Plex/);
+      assert.doesNotMatch(friend.body, /admin.example.com/);
+    });
+
+    test("/healthz stays open for the container health check", async () => {
+      assert.equal((await send(port, "GET", "/healthz")).status, 200);
+    });
+
+    test("the admin hostname is still handled only by the admin menu", async () => {
+      assert.equal((await send(port, "GET", "/", { headers: { host: "admin.example.com" } })).body, "admin handler");
+    });
   });
 });
 

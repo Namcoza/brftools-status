@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Config } from "./config.ts";
 import { isDatabaseReachable, listReleases, type Pool } from "./db.ts";
-import { FAVICON_SVG } from "./html.ts";
+import type { StatusGate } from "./gate.ts";
+import { escapeHtml, FAVICON_SVG, glyph, page } from "./html.ts";
 import { parseSection, renderHome, type HomeData, type MediaFilter, type MediaView } from "./home.ts";
 import type { MediaStatus } from "./media.ts";
 import type { ServerStatus } from "./minecraft.ts";
@@ -16,6 +17,8 @@ export interface Sources {
   tailscale?: () => Promise<TailscaleView>;
   // The private admin menu handles every request whose Host is its hostname, and nothing else.
   admin?: { hostname: string; handle: Handler };
+  // Sign-in for the status page. Unset leaves it public.
+  gate?: StatusGate;
 }
 
 const MEDIA_GROUPS: MediaFilter[] = ["play", "lib", "fetch"];
@@ -56,6 +59,27 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
         });
       }
 
+      // Everything below needs a signed-in, invited visitor when sign-in is on. /healthz stays
+      // open above: the container health check and automatic rollback depend on it.
+      const visitor = sources.gate ? await sources.gate.check(req) : null;
+      if (visitor?.kind === "anonymous") {
+        console.error(`status: refused ${req.method} ${JSON.stringify(req.url)}: ${visitor.reason}`);
+        return sendHtml(res, 403, refusalPage(config, "Sign in required", "<p>Open the status page through its usual address to sign in with Google.</p>"));
+      }
+      if (visitor?.kind === "uninvited") {
+        console.log(`status: refused ${JSON.stringify(visitor.email)}: not invited`);
+        return sendHtml(
+          res,
+          403,
+          refusalPage(
+            config,
+            "Not invited",
+            `<p>You are signed in as <strong>${escapeHtml(visitor.email)}</strong>, which has not been invited to this page. Ask the owner to invite this Google account.</p>
+      <div class="actions"><a class="btn" href="/cdn-cgi/access/logout">Sign out and use another account</a></div>`,
+          ),
+        );
+      }
+
       const section = req.method === "GET" ? parseSection(url.pathname) : null;
       if (section) {
         const [releases, tailscale] = await Promise.all([listReleases(pool), sources.tailscale?.()]);
@@ -71,7 +95,8 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
           tailscale: tailscale ?? null,
           releases,
           facts: config.homeFacts,
-          adminUrl: sources.admin ? `https://${sources.admin.hostname}` : "",
+          // "Open" links go through the owner-only admin menu, so only the owner gets them.
+          adminUrl: sources.admin && (!visitor || visitor.kind === "owner") ? `https://${sources.admin.hostname}` : "",
           nav: config.nav,
           now: new Date(),
           mediaFilter,
@@ -92,6 +117,19 @@ export function createApp(config: Config, pool: Pool, sources: Sources = {}): Se
 
 function hostOf(req: IncomingMessage): string {
   return (req.headers.host ?? "").toLowerCase().replace(/:\d+$/, "");
+}
+
+function refusalPage(config: Config, title: string, html: string): string {
+  const { statusUrl, gamesUrl, mapUrl } = config.nav;
+  const body = `<p class="state bad">${glyph("bad")}</p>
+      <h1>${escapeHtml(title)}</h1>
+      ${html}`;
+  return page({ title: `${title} · brftools`, body, nav: { status: statusUrl || "/", games: gamesUrl, map: mapUrl }, faviconUrl: "/favicon.svg" });
+}
+
+function sendHtml(res: ServerResponse, status: number, html: string): void {
+  res.writeHead(status, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+  res.end(html);
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {

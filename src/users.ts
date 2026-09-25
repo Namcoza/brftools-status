@@ -18,7 +18,13 @@ export interface UserStore {
   add(email: string): Promise<boolean>;
   // False when the email was not on the list.
   remove(email: string): Promise<boolean>;
+  // A signed-in visit to the status page: true when the email is invited, recording the first
+  // visit and, at most every few minutes, the latest one.
+  visit(email: string): Promise<boolean>;
 }
+
+// Pages reload every minute; recording each reload would be a write per viewer per minute.
+const LAST_SEEN_EVERY_MS = 5 * 60_000;
 
 // Deliberately loose: Google decides what a valid account is. This only keeps obvious typos
 // and oversized input out of the table.
@@ -51,6 +57,15 @@ export function createUserStore(pool: Pool): UserStore {
     async remove(email) {
       const { rowCount } = await pool.query("DELETE FROM users WHERE email = $1", [email]);
       return rowCount === 1;
+    },
+    async visit(email) {
+      const { rows } = await pool.query<{ last_seen_at: Date | null }>("SELECT last_seen_at FROM users WHERE email = $1", [email]);
+      const row = rows[0];
+      if (!row) return false;
+      if (!row.last_seen_at || Date.now() - row.last_seen_at.getTime() >= LAST_SEEN_EVERY_MS) {
+        await pool.query("UPDATE users SET first_seen_at = COALESCE(first_seen_at, now()), last_seen_at = now() WHERE email = $1", [email]);
+      }
+      return true;
     },
   };
 }
