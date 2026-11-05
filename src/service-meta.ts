@@ -75,6 +75,12 @@ export const SERVICE_META: Record<string, ServiceMeta> = {
     role: "Torrent downloads",
     description: "The other downloader, for torrents. Finished torrents are left seeding on purpose where the source expects it.",
   },
+  llm: {
+    group: "other",
+    role: "Local chat model",
+    description:
+      "A large language model running on another machine at home, with a chat page in front of it. Nothing leaves the house, and it is reachable only on the home network and Tailscale. Shows Down for about a minute after a restart while the model loads.",
+  },
 };
 
 export function serviceMeta(id: string): ServiceMeta {
