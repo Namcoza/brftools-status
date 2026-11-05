@@ -79,7 +79,7 @@ export const SERVICE_META: Record<string, ServiceMeta> = {
     group: "other",
     role: "Local chat model",
     description:
-      "A large language model running on another machine at home, with a chat page in front of it. Nothing leaves the house, and it is reachable only on the home network and Tailscale. Shows Down for about a minute after a restart while the model loads.",
+      "A locally hosted AI chat bot: Qwen3.6-35B-A3B served by llama.cpp on another machine at home, with Open WebUI as its chat page. Reachable on the home network and Tailscale only. Shows Down for about a minute after a restart while the model loads.",
   },
 };
 
